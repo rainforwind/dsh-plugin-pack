@@ -1,0 +1,4 @@
+# dsh bundle patch: inserts task-badge into the profile's host layer stack.
+- insert:
+   - id: dsh-task-badge
+     name: 'dsh-task-badge'
