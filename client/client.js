@@ -166,7 +166,13 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
 
       const handleClick = async () => {
         try {
-          const res = await fetch(api("/task-badge/mark-viewed"), { method: "POST" });
+          // Only mark the current session as viewed, not all
+          const sid = currentSessionId();
+          const res = await fetch(api("/task-badge/mark-viewed"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId: sid })
+          });
           const data = await res.json();
           setCounts({ running: data.running, completedUnviewed: data.completedUnviewed });
           setFavicon(data.running, data.completedUnviewed);
