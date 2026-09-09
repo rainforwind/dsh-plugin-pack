@@ -17,6 +17,7 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
 
   function apply(ctx) {
     const slots = ctx.get("slots");
+    const sessions = ctx.get("sessions");
     if (!slots) return;
 
     var origSrc = null;
@@ -91,36 +92,53 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
     function TaskBadge() {
       const [running, setRunning] = React.useState(0);
       const [unreadCount, setUnreadCount] = React.useState(0);
-      // Client-side seen set: tracks which unread sessions the user has viewed
       const seenRef = React.useRef(new Set());
-      // Track previous unreadSessionIds to detect new entries
-      const prevUnreadRef = React.useRef([]);
+      const unreadIdsRef = React.useRef([]);
 
       React.useEffect(() => {
         let alive = true;
 
         const poll = async () => {
           try {
+            // Get current session ID from DSH client service
+            let currentSessionId = null;
+            if (sessions && sessions.list && typeof sessions.list.getSnapshot === "function") {
+              try {
+                currentSessionId = sessions.list.getSnapshot().current || null;
+              } catch (e) {}
+            }
+
+            // Tell host which session user is viewing → auto-mark as read
+            if (currentSessionId) {
+              try {
+                await fetch(api("/task-badge/mark-viewed"), {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ sessionId: currentSessionId })
+                });
+              } catch (e) {}
+            }
+
             const res = await fetch(api("/task-badge/counts"));
             const data = await res.json();
             if (!alive) return;
 
             const newUnreadIds = data.unreadSessionIds || [];
+            unreadIdsRef.current = newUnreadIds;
 
-            // Add any newly appeared unread sessions (don't auto-add to seen)
-            // The seen set only grows when user clicks badge or navigates
-
-            // Compute unread: sessions in unreadSessionIds that aren't in seenSet
+            // Compute unread: exclude current session + seen sessions
             let count = 0;
             for (let i = 0; i < newUnreadIds.length; i++) {
-              if (!seenRef.current.has(newUnreadIds[i])) count++;
+              const id = newUnreadIds[i];
+              if (id === currentSessionId) continue;
+              if (seenRef.current.has(id)) continue;
+              count++;
             }
             count += (data.unviewedJobs || 0);
 
             setRunning(data.running || 0);
             setUnreadCount(count);
             setFavicon(data.running || 0, count);
-            prevUnreadRef.current = newUnreadIds;
           } catch (e) {}
         };
 
@@ -137,16 +155,41 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
       const total = running + unreadCount;
       if (total === 0) return null;
 
-      // Click badge → mark all as read (client-side, matches native behavior)
+      // Click badge → navigate to first unread session
       const handleClick = async () => {
         try {
           const res = await fetch(api("/task-badge/counts"));
           const data = await res.json();
           const ids = data.unreadSessionIds || [];
-          // Add all current unread IDs to seen set
-          for (let i = 0; i < ids.length; i++) seenRef.current.add(ids[i]);
-          setUnreadCount(data.unviewedJobs || 0);
-          setFavicon(data.running || 0, data.unviewedJobs || 0);
+
+          // Find first unread session and navigate to it
+          let currentSessionId = null;
+          if (sessions && sessions.list && typeof sessions.list.getSnapshot === "function") {
+            try { currentSessionId = sessions.list.getSnapshot().current || null; } catch (e) {}
+          }
+
+          let targetId = null;
+          for (let i = 0; i < ids.length; i++) {
+            if (ids[i] !== currentSessionId && !seenRef.current.has(ids[i])) {
+              targetId = ids[i];
+              break;
+            }
+          }
+
+          if (targetId && sessions && typeof sessions.open === "function") {
+            sessions.open(targetId);
+            seenRef.current.add(targetId);
+          }
+
+          // Update counts
+          let count = 0;
+          for (let i = 0; i < ids.length; i++) {
+            if (ids[i] === targetId) continue;
+            if (seenRef.current.has(ids[i])) continue;
+            count++;
+          }
+          setUnreadCount(count + (data.unviewedJobs || 0));
+          setFavicon(data.running || 0, count + (data.unviewedJobs || 0));
         } catch (e) {}
       };
 
@@ -154,8 +197,7 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
         onClick: handleClick,
         title: (running > 0 ? running + " running" : "") +
                (running > 0 && unreadCount > 0 ? ", " : "") +
-               (unreadCount > 0 ? unreadCount + " unread" : "") +
-               " \u2014 click to mark read",
+               (unreadCount > 0 ? unreadCount + " unread \u2014 click to view" : ""),
         style: { padding: "4px 6px", display: "flex", alignItems: "center", gap: "4px", cursor: "pointer" }
       },
         running > 0 ? React.createElement("span", {
