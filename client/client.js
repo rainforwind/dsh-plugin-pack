@@ -15,11 +15,10 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
     return new URL(relative, document.baseURI).pathname;
   }
 
-  // Extract session id from URL hash like "#/session/abc123" or "#abc123"
+  // Extract session id from URL hash
   function currentSessionId() {
     try {
       const hash = window.location.hash || "";
-      // Match patterns: #/session/xxx, #xxx, #/xxx
       const m = hash.match(/[#/]+(?:session[/]+)?([a-zA-Z0-9_-]+)/);
       return m ? m[1] : null;
     } catch (e) { return null; }
@@ -52,17 +51,12 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
         if (origImg) { try { cx.drawImage(origImg, 0, 0, 32, 32); } catch (e) {} }
 
         if (r + u > 0) {
-          // Draw two separate badges: running (blue, top-left) + unread (red, bottom-right)
           if (r > 0 && u > 0) {
-            // Running badge - top left
             drawBadge(cx, 22, 8, 8, "#3b82f6", r);
-            // Unread badge - bottom right
             drawBadge(cx, 24, 24, 9, "#ef4444", u);
           } else if (r > 0) {
-            // Only running - top right
             drawBadge(cx, 24, 24, 10, "#3b82f6", r);
           } else {
-            // Only unread - top right
             drawBadge(cx, 24, 24, 10, "#ef4444", u);
           }
         }
@@ -106,14 +100,14 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
     function TaskBadge() {
       const [counts, setCounts] = React.useState({ running: 0, completedUnviewed: 0 });
 
-      // Poll counts + auto-clear unread when session changes
       React.useEffect(() => {
         let alive = true;
         let lastSession = null;
 
-        const notifySession = async (sessionId) => {
+        // Notify host which session user is viewing
+        const notifyViewing = async (sessionId) => {
           try {
-            await fetch(api("/task-badge/mark-viewed"), {
+            await fetch(api("/task-badge/viewing"), {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ sessionId })
@@ -123,12 +117,11 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
 
         const poll = async () => {
           try {
-            // Detect session switch via URL hash
+            // Detect session switch via URL hash -> auto-mark as read
             const sid = currentSessionId();
-            if (sid && sid !== lastSession) {
+            if (sid !== lastSession) {
               lastSession = sid;
-              // Tell host user is now viewing this session
-              await notifySession(sid);
+              if (sid) await notifyViewing(sid);
             }
 
             const res = await fetch(api("/task-badge/counts"));
@@ -143,12 +136,12 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
         poll();
         const dispose = ctx.interval(poll, 3000);
 
-        // Also listen for hashchange for instant response
+        // Instant response on hash change
         const onHash = () => {
           const sid = currentSessionId();
-          if (sid && sid !== lastSession) {
+          if (sid !== lastSession) {
             lastSession = sid;
-            notifySession(sid);
+            if (sid) notifyViewing(sid);
           }
         };
         window.addEventListener("hashchange", onHash);
@@ -164,29 +157,14 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
       const total = counts.running + counts.completedUnviewed;
       if (total === 0) return null;
 
-      const handleClick = async () => {
-        try {
-          // Only mark the current session as viewed, not all
-          const sid = currentSessionId();
-          const res = await fetch(api("/task-badge/mark-viewed"), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sessionId: sid })
-          });
-          const data = await res.json();
-          setCounts({ running: data.running, completedUnviewed: data.completedUnviewed });
-          setFavicon(data.running, data.completedUnviewed);
-        } catch (e) {}
-      };
+      // Read-only display, no click handler
+      let label = "";
+      if (counts.running > 0) label += counts.running + " running";
+      if (counts.completedUnviewed > 0) { if (label) label += ", "; label += counts.completedUnviewed + " unread"; }
 
-      // Build label with colored indicators
-      return React.createElement("button", {
-        onClick: handleClick,
-        title: (counts.running > 0 ? counts.running + " running" : "") +
-               (counts.running > 0 && counts.completedUnviewed > 0 ? ", " : "") +
-               (counts.completedUnviewed > 0 ? counts.completedUnviewed + " unread" : "") +
-               " \u2014 click to clear",
-        style: { background: "none", border: "none", cursor: "pointer", padding: "4px 6px", display: "flex", alignItems: "center", gap: "4px" }
+      return React.createElement("div", {
+        title: label,
+        style: { padding: "4px 6px", display: "flex", alignItems: "center", gap: "4px", userSelect: "none" }
       },
         counts.running > 0 ? React.createElement("span", {
           style: {
