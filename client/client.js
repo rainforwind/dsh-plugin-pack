@@ -124,7 +124,11 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
               if (sid) await notifyViewing(sid);
             }
 
-            const res = await fetch(api("/task-badge/counts"));
+            // Pass current sessionId so host excludes it from unread count
+            const countsUrl = sid
+              ? api("/task-badge/counts") + "?sessionId=" + encodeURIComponent(sid)
+              : api("/task-badge/counts");
+            const res = await fetch(countsUrl);
             const data = await res.json();
             if (alive) {
               setCounts({ running: data.running, completedUnviewed: data.completedUnviewed });
