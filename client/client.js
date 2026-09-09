@@ -15,15 +15,6 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
     return new URL(relative, document.baseURI).pathname;
   }
 
-  // Extract session id from URL hash
-  function currentSessionId() {
-    try {
-      const hash = window.location.hash || "";
-      const m = hash.match(/[#/]+(?:session[/]+)?([a-zA-Z0-9_-]+)/);
-      return m ? m[1] : null;
-    } catch (e) { return null; }
-  }
-
   function apply(ctx) {
     const slots = ctx.get("slots");
     if (!slots) return;
@@ -98,94 +89,91 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
     }
 
     function TaskBadge() {
-      const [counts, setCounts] = React.useState({ running: 0, completedUnviewed: 0 });
+      const [running, setRunning] = React.useState(0);
+      const [unreadCount, setUnreadCount] = React.useState(0);
+      // Client-side seen set: tracks which unread sessions the user has viewed
+      const seenRef = React.useRef(new Set());
+      // Track previous unreadSessionIds to detect new entries
+      const prevUnreadRef = React.useRef([]);
 
       React.useEffect(() => {
         let alive = true;
-        let lastSession = null;
-
-        // Notify host which session user is viewing
-        const notifyViewing = async (sessionId) => {
-          try {
-            await fetch(api("/task-badge/viewing"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ sessionId })
-            });
-          } catch (e) {}
-        };
 
         const poll = async () => {
           try {
-            // Detect session switch via URL hash -> auto-mark as read
-            const sid = currentSessionId();
-            if (sid !== lastSession) {
-              lastSession = sid;
-              if (sid) await notifyViewing(sid);
-            }
-
-            // Pass current sessionId so host excludes it from unread count
-            const countsUrl = sid
-              ? api("/task-badge/counts") + "?sessionId=" + encodeURIComponent(sid)
-              : api("/task-badge/counts");
-            const res = await fetch(countsUrl);
+            const res = await fetch(api("/task-badge/counts"));
             const data = await res.json();
-            if (alive) {
-              setCounts({ running: data.running, completedUnviewed: data.completedUnviewed });
-              setFavicon(data.running, data.completedUnviewed);
+            if (!alive) return;
+
+            const newUnreadIds = data.unreadSessionIds || [];
+
+            // Add any newly appeared unread sessions (don't auto-add to seen)
+            // The seen set only grows when user clicks badge or navigates
+
+            // Compute unread: sessions in unreadSessionIds that aren't in seenSet
+            let count = 0;
+            for (let i = 0; i < newUnreadIds.length; i++) {
+              if (!seenRef.current.has(newUnreadIds[i])) count++;
             }
+            count += (data.unviewedJobs || 0);
+
+            setRunning(data.running || 0);
+            setUnreadCount(count);
+            setFavicon(data.running || 0, count);
+            prevUnreadRef.current = newUnreadIds;
           } catch (e) {}
         };
 
         poll();
         const dispose = ctx.interval(poll, 3000);
 
-        // Instant response on hash change
-        const onHash = () => {
-          const sid = currentSessionId();
-          if (sid !== lastSession) {
-            lastSession = sid;
-            if (sid) notifyViewing(sid);
-          }
-        };
-        window.addEventListener("hashchange", onHash);
-
         return () => {
           alive = false;
           dispose();
           clearFavicon();
-          window.removeEventListener("hashchange", onHash);
         };
       }, []);
 
-      const total = counts.running + counts.completedUnviewed;
+      const total = running + unreadCount;
       if (total === 0) return null;
 
-      // Read-only display, no click handler
-      let label = "";
-      if (counts.running > 0) label += counts.running + " running";
-      if (counts.completedUnviewed > 0) { if (label) label += ", "; label += counts.completedUnviewed + " unread"; }
+      // Click badge → mark all as read (client-side, matches native behavior)
+      const handleClick = async () => {
+        try {
+          const res = await fetch(api("/task-badge/counts"));
+          const data = await res.json();
+          const ids = data.unreadSessionIds || [];
+          // Add all current unread IDs to seen set
+          for (let i = 0; i < ids.length; i++) seenRef.current.add(ids[i]);
+          setUnreadCount(data.unviewedJobs || 0);
+          setFavicon(data.running || 0, data.unviewedJobs || 0);
+        } catch (e) {}
+      };
 
       return React.createElement("div", {
-        title: label,
-        style: { padding: "4px 6px", display: "flex", alignItems: "center", gap: "4px", userSelect: "none" }
+        onClick: handleClick,
+        title: (running > 0 ? running + " running" : "") +
+               (running > 0 && unreadCount > 0 ? ", " : "") +
+               (unreadCount > 0 ? unreadCount + " unread" : "") +
+               " \u2014 click to mark read",
+        style: { padding: "4px 6px", display: "flex", alignItems: "center", gap: "4px", cursor: "pointer" }
       },
-        counts.running > 0 ? React.createElement("span", {
+        running > 0 ? React.createElement("span", {
           style: {
             background: "#3b82f6", color: "white", borderRadius: "10px", fontSize: "11px", fontWeight: "600",
             minWidth: "18px", height: "18px", display: "inline-flex",
             alignItems: "center", justifyContent: "center", padding: "0 4px",
             fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif"
           }
-        }, String(counts.running)) : null,
-        counts.completedUnviewed > 0 ? React.createElement("span", {
+        }, String(running)) : null,
+        unreadCount > 0 ? React.createElement("span", {
           style: {
             background: "#ef4444", color: "white", borderRadius: "10px", fontSize: "11px", fontWeight: "600",
             minWidth: "18px", height: "18px", display: "inline-flex",
             alignItems: "center", justifyContent: "center", padding: "0 4px",
             fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif"
           }
-        }, String(counts.completedUnviewed)) : null
+        }, String(unreadCount)) : null
       );
     }
 
