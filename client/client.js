@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
   let React = require("react");
 
   const name = "dsh-task-badge-client";
-  const inject = ["timer"];
+  const inject = ["timer", "sessions"];
 
   function api(path) {
     const relative = path.replace(/^\/+/, "");
@@ -20,20 +20,12 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
     const sessions = ctx.get("sessions");
     if (!slots) return;
 
-    // === Track current session by hooking sessions.open ===
-    const currentSessionRef = { id: null };
-    if (sessions && typeof sessions.open === "function") {
-      const origOpen = sessions.open.bind(sessions);
-      sessions.open = function (id) {
-        currentSessionRef.id = id;
-        // Immediately tell host this session is being viewed
-        fetch(api("/task-badge/mark-viewed"), {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId: id })
-        }).catch(() => {});
-        return origOpen(id);
-      };
+    function getCurrentSessionId() {
+      if (!sessions) return null;
+      try {
+        // Use the same API as dsh-client-ui-workspace (line 117)
+        return sessions.list?.getSnapshot?.()?.current || null;
+      } catch (e) { return null; }
     }
 
     var origSrc = null;
@@ -108,27 +100,33 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
     function TaskBadge() {
       const [running, setRunning] = React.useState(0);
       const [unreadCount, setUnreadCount] = React.useState(0);
-      const seenRef = React.useRef(new Set());
 
       React.useEffect(() => {
         let alive = true;
 
         const poll = async () => {
           try {
+            const cur = getCurrentSessionId();
+
+            // Tell host which session user is currently viewing
+            if (cur) {
+              fetch(api("/task-badge/mark-viewed"), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ sessionId: cur })
+              }).catch(() => {});
+            }
+
             const res = await fetch(api("/task-badge/counts"));
             const data = await res.json();
             if (!alive) return;
 
             const unreadIds = data.unreadSessionIds || [];
-            const cur = currentSessionRef.id;
 
-            // Compute unread: exclude current session + seen sessions
+            // Compute unread: exclude current session
             let count = 0;
             for (let i = 0; i < unreadIds.length; i++) {
-              const id = unreadIds[i];
-              if (id === cur) continue;
-              if (seenRef.current.has(id)) continue;
-              count++;
+              if (unreadIds[i] !== cur) count++;
             }
             count += (data.unviewedJobs || 0);
 
@@ -154,33 +152,19 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
       // Click badge → navigate to first unread session
       const handleClick = async () => {
         try {
+          const cur = getCurrentSessionId();
           const res = await fetch(api("/task-badge/counts"));
           const data = await res.json();
           const ids = data.unreadSessionIds || [];
-          const cur = currentSessionRef.id;
 
           let targetId = null;
           for (let i = 0; i < ids.length; i++) {
-            if (ids[i] !== cur && !seenRef.current.has(ids[i])) {
-              targetId = ids[i];
-              break;
-            }
+            if (ids[i] !== cur) { targetId = ids[i]; break; }
           }
 
           if (targetId && sessions && typeof sessions.open === "function") {
             sessions.open(targetId);
           }
-
-          // Recompute unread
-          let count = 0;
-          for (let i = 0; i < ids.length; i++) {
-            if (ids[i] === targetId) continue;
-            if (ids[i] === cur) continue;
-            if (seenRef.current.has(ids[i])) continue;
-            count++;
-          }
-          setUnreadCount(count + (data.unviewedJobs || 0));
-          setFavicon(data.running || 0, count + (data.unviewedJobs || 0));
         } catch (e) {}
       };
 
