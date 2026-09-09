@@ -20,6 +20,22 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
     const sessions = ctx.get("sessions");
     if (!slots) return;
 
+    // === Track current session by hooking sessions.open ===
+    const currentSessionRef = { id: null };
+    if (sessions && typeof sessions.open === "function") {
+      const origOpen = sessions.open.bind(sessions);
+      sessions.open = function (id) {
+        currentSessionRef.id = id;
+        // Immediately tell host this session is being viewed
+        fetch(api("/task-badge/mark-viewed"), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId: id })
+        }).catch(() => {});
+        return origOpen(id);
+      };
+    }
+
     var origSrc = null;
     var origImg = null;
     try {
@@ -93,44 +109,24 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
       const [running, setRunning] = React.useState(0);
       const [unreadCount, setUnreadCount] = React.useState(0);
       const seenRef = React.useRef(new Set());
-      const unreadIdsRef = React.useRef([]);
 
       React.useEffect(() => {
         let alive = true;
 
         const poll = async () => {
           try {
-            // Get current session ID from DSH client service
-            let currentSessionId = null;
-            if (sessions && sessions.list && typeof sessions.list.getSnapshot === "function") {
-              try {
-                currentSessionId = sessions.list.getSnapshot().current || null;
-              } catch (e) {}
-            }
-
-            // Tell host which session user is viewing → auto-mark as read
-            if (currentSessionId) {
-              try {
-                await fetch(api("/task-badge/mark-viewed"), {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ sessionId: currentSessionId })
-                });
-              } catch (e) {}
-            }
-
             const res = await fetch(api("/task-badge/counts"));
             const data = await res.json();
             if (!alive) return;
 
-            const newUnreadIds = data.unreadSessionIds || [];
-            unreadIdsRef.current = newUnreadIds;
+            const unreadIds = data.unreadSessionIds || [];
+            const cur = currentSessionRef.id;
 
             // Compute unread: exclude current session + seen sessions
             let count = 0;
-            for (let i = 0; i < newUnreadIds.length; i++) {
-              const id = newUnreadIds[i];
-              if (id === currentSessionId) continue;
+            for (let i = 0; i < unreadIds.length; i++) {
+              const id = unreadIds[i];
+              if (id === cur) continue;
               if (seenRef.current.has(id)) continue;
               count++;
             }
@@ -161,16 +157,11 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
           const res = await fetch(api("/task-badge/counts"));
           const data = await res.json();
           const ids = data.unreadSessionIds || [];
-
-          // Find first unread session and navigate to it
-          let currentSessionId = null;
-          if (sessions && sessions.list && typeof sessions.list.getSnapshot === "function") {
-            try { currentSessionId = sessions.list.getSnapshot().current || null; } catch (e) {}
-          }
+          const cur = currentSessionRef.id;
 
           let targetId = null;
           for (let i = 0; i < ids.length; i++) {
-            if (ids[i] !== currentSessionId && !seenRef.current.has(ids[i])) {
+            if (ids[i] !== cur && !seenRef.current.has(ids[i])) {
               targetId = ids[i];
               break;
             }
@@ -178,13 +169,13 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
 
           if (targetId && sessions && typeof sessions.open === "function") {
             sessions.open(targetId);
-            seenRef.current.add(targetId);
           }
 
-          // Update counts
+          // Recompute unread
           let count = 0;
           for (let i = 0; i < ids.length; i++) {
             if (ids[i] === targetId) continue;
+            if (ids[i] === cur) continue;
             if (seenRef.current.has(ids[i])) continue;
             count++;
           }
