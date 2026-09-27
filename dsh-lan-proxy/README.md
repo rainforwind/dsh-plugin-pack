@@ -11,7 +11,7 @@ DSH 出于安全考虑只在回环地址提供 Web 服务，`dsh web --host 0.0.
                         127.0.0.1:<web 端口>（原有 Web 服务，行为不变）
 ```
 
-- **来源白名单**：只放行 `allow` 里的 IP / CIDR（如 `100.64.0.5`、`100.64.0.0/10`）；回环来源始终放行（本机本来就能直连）。
+- **来源白名单**：只放行 `allow` 里**显式配置**的 IP / CIDR（支持 IPv4/IPv6 单地址与网段），不预置任何默认 IP 或网段；回环来源始终放行（本机本来就能直连）。
 - **协议全支持**：普通 HTTP、SSE（`/api` 的事件流）、WebSocket 升级（`/api/remote.mux`）全部转发。
 - **零侵入**：只读取消费 `webServer` / `connection` / `settings` 三个服务，不注册任何路由、不改写任何别人的组合行，卸载即消失。
 - **热配置**：配置存放在 `lan-proxy` settings 命名空间（`$DSH_HOME/settings.yaml`），修改后立即生效，无需重启。
@@ -37,7 +37,7 @@ cp -r dsh-plugin-pack/dsh-lan-proxy ~/.dsh/profiles/web/node_modules/
 1. `dependencies` 中加入 `"dsh-lan-proxy": "file:./node_modules/dsh-lan-proxy"`（防被 `pnpm install` 清掉）；
 2. `dsh.profile.bundles` 数组中加入 `"dsh-lan-proxy"`（放在其他条目之后即可）。
 
-重启 `dsh web` 后插件挂载（默认 `enabled: false`，不产生任何行为）。
+重启 `dsh web` 后插件挂载。**插件不预置任何默认 IP / 网段**：schema 默认 `enabled: false`；即使启用，`allow` 为空时也对外完全关闭（非回环监听 + 空白名单会拒绝启动并打印提示）。
 
 ## 配置
 
@@ -46,11 +46,11 @@ cp -r dsh-plugin-pack/dsh-lan-proxy ~/.dsh/profiles/web/node_modules/
 ```yaml
 lan-proxy:
   enabled: true
-  host: "0.0.0.0"          # 监听地址；也可填本机某个网卡 IP（如 Tailscale 的 100.x.x.x）只对一个接口开放
+  host: "0.0.0.0"          # 监听地址；也可填本机某个网卡 IP，只对一个接口开放
   port: 3081               # 代理监听端口
-  allow:                   # 来源 IP 白名单：精确 IP 或 CIDR
-    - 100.64.0.0/10        # Tailscale 全段（100.64.0.0/10）；建议收窄到具体设备 IP
-    # - 100.101.102.103    # 例如只允许某一台设备
+  allow:                   # 来源白名单：按需填写，不预置任何默认网段；留空 = 不对外开放
+    - 192.168.1.23         # 例：只允许某一台设备
+    # - 10.0.0.0/8         # 例：某个网段（仅在可信网络这样做）
 ```
 
 | 字段 | 默认值 | 说明 |
@@ -58,7 +58,7 @@ lan-proxy:
 | `enabled` | `false` | 为 `true` 时才启动代理 |
 | `host` | `0.0.0.0` | 代理监听地址；填具体网卡 IP 可只暴露该接口 |
 | `port` | `3081` | 代理监听端口；`0` 表示由系统分配 |
-| `allow` | `[]` | 来源 IP / CIDR 白名单；**监听非回环地址且该列表为空时拒绝启动** |
+| `allow` | `[]` | 来源 IP / CIDR 白名单，**无默认值**；监听非回环地址且该列表为空时拒绝启动 |
 | `targetHost` | `127.0.0.1` | 被代理的 Web 服务地址 |
 | `targetPort` | `0` | 被代理的 Web 服务端口；`0` 表示跟随组合中 `webServer` 实际绑定的端口 |
 
@@ -66,8 +66,8 @@ lan-proxy:
 
 ```
 [lan-proxy] listening on 0.0.0.0:3081 → 127.0.0.1:3080
-[lan-proxy] allowed sources: 100.64.0.0/10
-[lan-proxy] LAN: http://100.101.102.103:3081/?token=<进程令牌>
+[lan-proxy] allowed sources: <你配置的 allow 列表>
+[lan-proxy] LAN: http://<本机地址>:3081/?token=<进程令牌>
 ```
 
 把打印出来的 `LAN:` URL 在远程设备上打开即可完成认证（与本机 URL 使用同一套 `?token=` 换 cookie 机制）。

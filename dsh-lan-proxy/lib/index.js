@@ -387,7 +387,7 @@ function closeListener(server, sockets) {
  */
 function assertStartable(bindHost, rules) {
   if (rules.length === 0 && !isLoopbackBind(bindHost)) {
-    throw new Error(`bind ${bindHost} is not loopback and the allowlist is empty; add at least one IP/CIDR`)
+    throw new Error(`bind ${bindHost} is not loopback and the allowlist is empty; add the source IPs/CIDRs you want to open`)
   }
 }
 
@@ -585,7 +585,7 @@ function applyPlugin(ctx, entryConfig) {
       return
     }
     if (rules.length === 0 && !isLoopbackBind(config.host)) {
-      log(`refusing to start: bind ${config.host} is not loopback and allow[] is empty — add at least one IP/CIDR (e.g. a Tailscale device or 100.64.0.0/10)`)
+      log(`refusing to start: bind ${config.host} is not loopback and allow[] is empty — add the source IPs/CIDRs you want to open (settings: lan-proxy.allow)`)
       return
     }
     const targetPort = await waitForTargetPort(mine)
