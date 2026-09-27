@@ -16,8 +16,24 @@ function apply(ctx) {
   // === Session tracking ===
   const activeSessions = new Set()      // session ids currently processing
   const unreadSessions = new Set()      // session ids with unread responses
+  const subagentSessions = new Set()    // session ids belonging to subagents (excluded from counts)
+
+  // Track subagent lifecycle to filter them out
+  ctx.on('subagent/start', (info) => {
+    if (info && info.sessionId) {
+      subagentSessions.add(info.sessionId)
+      console.log('[task-badge] subagent started:', info.sessionId)
+    }
+  })
+  ctx.on('subagent/end', (info) => {
+    if (info && info.sessionId) {
+      subagentSessions.delete(info.sessionId)
+      console.log('[task-badge] subagent ended:', info.sessionId)
+    }
+  })
 
   ctx.on('api-session/status', (sessionId, running) => {
+    if (subagentSessions.has(sessionId)) return // skip subagent sessions
     if (running) {
       activeSessions.add(sessionId)
     } else {
@@ -27,6 +43,7 @@ function apply(ctx) {
   })
 
   ctx.on('api-session/activity', (sessionId) => {
+    if (subagentSessions.has(sessionId)) return // skip subagent sessions
     unreadSessions.add(sessionId)
   })
 
