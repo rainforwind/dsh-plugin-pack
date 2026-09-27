@@ -1,0 +1,6 @@
+# dsh bundle patch: inserts the LAN/Tailscale reverse proxy into the profile's host layer stack.
+# The row is inert until `lan-proxy.enabled: true` reaches it through the
+# settings document ($DSH_HOME/settings.yaml) or this row's own config.
+- insert:
+   - id: dsh-lan-proxy
+     name: 'dsh-lan-proxy'
