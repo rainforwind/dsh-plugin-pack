@@ -72,6 +72,16 @@ lan-proxy:
 
 把打印出来的 `LAN:` URL 在远程设备上打开即可完成认证（与本机 URL 使用同一套 `?token=` 换 cookie 机制）。
 
+## Settings 面板（无需手改配置文件）
+
+插件附带浏览器半（`client/client.js`），在 Web GUI 的 **Settings → Plugins → Plugin configuration** 里提供 **LAN Proxy** 卡片，可直接编辑上表全部字段：
+
+- **本地暂存**：改动先作为草稿保存在浏览器里，标题旁出现 *Unsaved* 标记；**Save** 落盘（写入带 revision 栅栏，若配置在别处被改过会被拒绝而不是覆盖旧值），**Discard** 放弃草稿，**Reset to defaults** 恢复插件默认值（`enabled: false`、`allow: []`）。
+- **保存即热生效**：代理按新配置重新绑定监听地址与白名单，无需重启 `dsh web`。
+- **白名单文本框**：每行一个 IP / CIDR，格式非法会即时标红并阻止保存；面板**不预置任何默认 IP / 网段**，名单留空仍然等于对外关闭。
+- **只读提示**：DSH 的 settings 只在回环页面落盘——通过代理 / 局域网 URL 打开的页面是进程内只读（面板会显示提示）。请在本机浏览器 `http://127.0.0.1:<web 端口>/` 里修改。
+- 手改 `~/.dsh/settings.yaml` 依旧有效（同一 `lan-proxy` 命名空间、同样热加载）；两边同时改以最后一次写入为准，卡片检测到版本冲突会提示而不是覆盖。
+
 ## 工作原理与安全说明
 
 1. **Host/Origin 栅栏**：DSH 的 `/api` 要求 `Host` 是回环或受信权威，且附带的 `Origin` 必须等于 `Host`。代理把转发请求的 `Host` 重写为回环目标权威；`Origin` **仅当等于请求方原始权威（即同源流量）时**才一并重写，跨站 `Origin` 原样转发，由 DSH 自己的栅栏拒绝（测试覆盖该行为）。
@@ -84,10 +94,11 @@ lan-proxy:
 
 ```bash
 cd dsh-lan-proxy
-node test/run.mjs
+node test/run.mjs      # 代理核心：白名单、重写、转发、拒绝
+node test/client.mjs   # 浏览器半：模块装载 + 面板状态机（草稿/保存/冲突）
 ```
 
-覆盖：白名单匹配（IPv4/IPv6/CIDR/映射地址/回环）、非法配置拒绝启动、Host/Origin 重写与跨站不放行、HTTP 透传、SSE 流式转发、WebSocket 升级转发与拒绝、403 拦截。
+覆盖：白名单匹配（IPv4/IPv6/CIDR/映射地址/回环）、非法配置拒绝启动、Host/Origin 重写与跨站不放行、HTTP 透传、SSE 流式转发、WebSocket 升级转发与拒绝、403 拦截；客户端模块在打桩的 `window.__ModuleLoader__` 下装配，覆盖暂存、revision 栅栏保存、冲突提示、Discard/Reset 与白名单行校验。
 
 （测试直接 import 插件源码，需要能解析 `@deepseek-ai/schemastery`；在 profile 内运行，或临时软链该包到本地 `node_modules/`。）
 
