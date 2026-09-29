@@ -8,12 +8,16 @@ import { createServer, request as httpRequest } from 'node:http'
 import { connect as netConnect } from 'node:net'
 import {
   Config,
+  addressPending,
+  apply,
   assertStartable,
   compileAllowlist,
   matchesAllowlist,
+  nextRetryDelay,
   normalizeIp,
   rewriteRequestHeaders,
   startProxy,
+  transientBindReason,
 } from '../lib/index.js'
 
 let passed = 0
@@ -354,6 +358,111 @@ await test('disallowed source gets 403 on upgrade', async () => {
   socket.write('GET /ws HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n')
   await waitFor(() => buffer.text.includes('403'), 'denied upgrade response')
   socket.destroy()
+})
+
+// ── waiting for a bind that cannot succeed yet ──────────────────────────────
+
+await test('an unavailable VPN address is a transient reason, not a dead end', () => {
+  const reason = transientBindReason({ code: 'EADDRNOTAVAIL' }, '100.64.0.1')
+  assert.match(reason, /100\.64\.0\.1 is not an address of this machine/)
+  assert.match(reason, /Tailscale/)
+})
+
+await test('other temporary listen failures are transient too', () => {
+  assert.equal(transientBindReason({ code: 'EADDRINUSE' }, '0.0.0.0'), 'that port is already in use')
+  assert.equal(transientBindReason({ code: 'EACCES' }, '0.0.0.0'), 'this process may not bind that port')
+  assert.equal(transientBindReason({ code: 'EAFNOSUPPORT' }, 'fe80::1'), 'the address family of fe80::1 is not available here')
+  assert.equal(transientBindReason({ code: 'ENETDOWN' }, '0.0.0.0'), 'the network is down')
+  // A missing wildcard address is odd but still worth another attempt.
+  assert.equal(transientBindReason({ code: 'EADDRNOTAVAIL' }, '0.0.0.0'), 'the address 0.0.0.0 cannot be bound')
+})
+
+await test('a broken configuration is not retried', () => {
+  assert.equal(transientBindReason(new Error('boom'), '0.0.0.0'), undefined)
+  assert.equal(transientBindReason({ code: 'EPERM' }, '0.0.0.0'), undefined)
+  assert.equal(transientBindReason(undefined, '0.0.0.0'), undefined)
+})
+
+await test('the retry backoff ramps up and stops at its ceiling', () => {
+  assert.equal(nextRetryDelay(5000), 10000)
+  assert.equal(nextRetryDelay(10000), 20000)
+  assert.equal(nextRetryDelay(30000), 60000)
+  assert.equal(nextRetryDelay(60000), 60000)
+  assert.equal(nextRetryDelay(1), 5000, 'never polls faster than the floor')
+  // A link that is merely down is polled tightly enough to feel instant.
+  assert.equal(nextRetryDelay(10000, 15000), 15000)
+  assert.equal(nextRetryDelay(1000, 15000), 5000)
+})
+
+await test('a missing interface is retried tightly, a busy port lazily', () => {
+  assert.equal(addressPending('EADDRNOTAVAIL'), true)
+  assert.equal(addressPending('EAFNOSUPPORT'), true)
+  assert.equal(addressPending('ENETDOWN'), true)
+  assert.equal(addressPending('EADDRINUSE'), false)
+  assert.equal(addressPending('EACCES'), false)
+  assert.equal(addressPending(undefined), false)
+})
+
+// ── the listener waits instead of giving up ─────────────────────────────────
+
+await test('a busy port is waited out, not abandoned', async () => {
+  // Squat the port so the first bind cannot succeed, exactly like a VPN
+  // address that is not assigned yet.
+  const squatter = createServer(() => {})
+  await new Promise((resolve) => squatter.listen(0, '127.0.0.1', resolve))
+  const port = squatter.address().port
+
+  const lines = []
+  const realLog = console.log
+  console.log = (line) => lines.push(String(line))
+  const disposers = []
+  const ctx = {
+    get: (service) => (service === 'webServer' ? { port: 1 } : undefined),
+    inject: (list, callback) => {
+      callback()
+      return () => {}
+    },
+    effect: (fn) => {
+      disposers.push(fn())
+      return () => {}
+    },
+  }
+  apply(ctx, Config({ enabled: true, host: '127.0.0.1', port, allow: [] }))
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  console.log = realLog
+  try {
+    assert.ok(
+      lines.some((line) => line.includes('waiting to serve') && line.includes('already in use')),
+      `expected one waiting line, got ${JSON.stringify(lines)}`,
+    )
+    assert.equal(lines.length, 1, 'the wait is announced once, not on every attempt')
+
+    // Release the port; the plugin must take it on its own within the backoff.
+    await new Promise((resolve) => squatter.close(resolve))
+    const deadline = Date.now() + 20000
+    for (;;) {
+      const reachable = await new Promise((resolve) => {
+        const socket = netConnect(port, '127.0.0.1')
+        socket.once('connect', () => {
+          socket.destroy()
+          resolve(true)
+        })
+        socket.once('error', () => resolve(false))
+      })
+      if (reachable) break
+      if (Date.now() > deadline) assert.fail('the listener never took the freed port')
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+  } finally {
+    console.log = realLog
+    for (const dispose of disposers) dispose()
+  }
+  // Disposal releases the port again, so a waiting row never pins it.
+  await new Promise((resolve) => {
+    const probe = createServer()
+    probe.once('error', () => resolve())
+    probe.listen(port, '127.0.0.1', () => probe.close(resolve))
+  })
 })
 
 // ── teardown ───────────────────────────────────────────────────────────────

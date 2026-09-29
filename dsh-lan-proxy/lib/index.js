@@ -48,6 +48,12 @@ const TARGET_PORT_TIMEOUT_MS = 15000
 const TARGET_PORT_POLL_MS = 100
 /** Maximum LAN URLs printed on one banner (one line each, keeps the boot log short). */
 const MAX_BANNER_URLS = 6
+/** First delay before retrying a bind that cannot be satisfied yet. */
+const RETRY_MIN_MS = 5000
+/** Backoff ceiling while an interface is merely absent (VPN/Tailscale up soon). */
+const RETRY_QUICK_MAX_MS = 15000
+/** Backoff ceiling for waits that usually mean "something else holds it". */
+const RETRY_MAX_MS = 60000
 /**
  * Close started by the previous fiber instance. dsh restarts a row on every
  * configuration change, and a disposer cannot be awaited, so the next bind
@@ -521,12 +527,95 @@ async function startProxy(options) {
 
 //#region plugin wiring
 
+/**
+ * Why a listen failed for a reason that can resolve itself, or undefined when
+ * the configuration itself is wrong. A Tailscale address that is not assigned
+ * yet (EADDRNOTAVAIL) is the everyday case: the proxy must wait for the
+ * interface instead of giving up for the rest of the process's life.
+ * @param error - the `startProxy` failure.
+ * @param bindHost - the address the listener asked for.
+ * @returns a human sentence, or undefined when retrying would not help.
+ */
+function transientBindReason(error, bindHost) {
+  switch (error?.code) {
+    case 'EADDRNOTAVAIL':
+      return isLoopbackBind(bindHost) || bindHost === '0.0.0.0' || bindHost === '::'
+        ? `the address ${bindHost} cannot be bound`
+        : `${bindHost} is not an address of this machine right now (VPN/Tailscale down?)`
+    case 'EADDRINUSE':
+      return 'that port is already in use'
+    case 'EACCES':
+      return 'this process may not bind that port'
+    case 'EAFNOSUPPORT':
+      return `the address family of ${bindHost} is not available here`
+    case 'ENETDOWN':
+    case 'ENETUNREACH':
+      return 'the network is down'
+    default:
+      return undefined
+  }
+}
+
+/**
+ * Exponential backoff for the wait, so an address that stays down costs one
+ * quiet timer instead of a busy loop, and recovery is still prompt.
+ * @param delay - the previous delay in milliseconds.
+ * @param cap - ceiling for this kind of wait.
+ * @returns the next delay.
+ */
+function nextRetryDelay(delay, cap = RETRY_MAX_MS) {
+  return Math.min(cap, Math.max(RETRY_MIN_MS, Math.round(delay * 2)))
+}
+
+/**
+ * Whether a listen failed because the interface itself is not up, which is
+ * the case that usually clears within seconds (a VPN or Tailscale link coming
+ * back) and therefore deserves a tighter retry ceiling.
+ * @param code - the `errno` code from the listen failure.
+ * @returns true when the wait is expected to be short.
+ */
+function addressPending(code) {
+  return code === 'EADDRNOTAVAIL' || code === 'EAFNOSUPPORT' || code === 'ENETDOWN' || code === 'ENETUNREACH'
+}
+
 /** Read this plugin's current configuration through a `source()` sink. */
 function applyPlugin(ctx, entryConfig) {
   let generation = 0
   /** Active listener as `{ handle, config, targetPort, urlsPrinted }`, or null. */
   let listener = null
+  /** Pending retry timer, or null. */
+  let retry = null
+  let retryDelay = RETRY_MIN_MS
+  /** What we are currently waiting for, so the wait is announced once. */
+  let waiting = null
   const log = (message) => console.log(`${LOG_PREFIX} ${message}`)
+
+  const clearRetry = () => {
+    if (retry === null) return
+    clearTimeout(retry)
+    retry = null
+  }
+
+  /**
+   * Announce the wait once, then poll with backoff until the bind can succeed.
+   * The timer is unref'd and cleared on dispose, so a waiting plugin never
+   * delays dsh startup or shutdown.
+   */
+  const scheduleRetry = (reason, cap = RETRY_MAX_MS) => {
+    if (waiting !== reason) {
+      waiting = reason
+      const where = entryConfig.port > 0 ? formatAuthority(entryConfig.host, entryConfig.port) : String(entryConfig.host)
+      log(`waiting to serve ${where}: ${reason}`)
+    }
+    const delay = retryDelay
+    retryDelay = nextRetryDelay(delay, cap)
+    clearRetry()
+    retry = setTimeout(() => {
+      retry = null
+      void reconfigure()
+    }, delay)
+    retry.unref?.()
+  }
 
   const targetPortNow = () => {
     if (entryConfig.targetPort > 0) return entryConfig.targetPort
@@ -599,7 +688,10 @@ function applyPlugin(ctx, entryConfig) {
     const targetPort = await waitForTargetPort(mine)
     if (mine !== generation) return
     if (targetPort === undefined) {
-      log(`target ${config.targetHost} port never became available; not starting`)
+      scheduleRetry(
+        `the Web server on ${formatAuthority(config.targetHost, String(config.targetPort))} is not up yet`,
+        RETRY_QUICK_MAX_MS,
+      )
       return
     }
     await closing
@@ -615,13 +707,23 @@ function applyPlugin(ctx, entryConfig) {
         log,
       })
     } catch (error) {
-      log(`failed to listen on ${formatAuthority(config.host, config.port)}: ${error.message}`)
+      const reason = transientBindReason(error, config.host)
+      if (reason === undefined) {
+        log(`failed to listen on ${formatAuthority(config.host, config.port)}: ${error.message}`)
+        return
+      }
+      scheduleRetry(reason, addressPending(error?.code) ? RETRY_QUICK_MAX_MS : RETRY_MAX_MS)
       return
     }
     if (mine !== generation) {
       await handle.close()
       return
     }
+    if (waiting !== null) {
+      log(`bound ${formatAuthority(config.host, handle.port)} — ${formatAuthority(config.host, config.port)} became available`)
+      waiting = null
+    }
+    retryDelay = RETRY_MIN_MS
     listener = { handle, config, targetPort, urlsPrinted: false }
     printBanner(config, handle, targetPort)
   }
@@ -641,6 +743,7 @@ function applyPlugin(ctx, entryConfig) {
   ctx.effect(
     () => () => {
       generation++
+      clearRetry()
       const active = listener
       listener = null
       if (active !== null) closing = active.handle.close()
@@ -663,6 +766,7 @@ function apply(ctx, entryConfig = {}) {
 export {
   Config,
   ENTRY_ID,
+  addressPending,
   apply,
   assertStartable,
   bitsMatch,
@@ -672,7 +776,9 @@ export {
   isLoopback,
   matchesAllowlist,
   name,
+  nextRetryDelay,
   normalizeIp,
   rewriteRequestHeaders,
   startProxy,
+  transientBindReason,
 }

@@ -15,6 +15,7 @@ DSH 出于安全考虑只在回环地址提供 Web 服务，`dsh web --host 0.0.
 - **协议全支持**：普通 HTTP、SSE（`/api` 的事件流）、WebSocket 升级（`/api/remote.mux`）全部转发。
 - **零侵入**：只消费 `webServer` / `connection` 两个服务，不注册任何路由、不改写任何别人的组合行，卸载即消失。
 - **热配置**：配置即本插件组合行的 `config`（`cordis.patch.yml` 或 Settings 页面），保存后 dsh 重启该行、代理立刻按新配置重绑，无需重启 `dsh web`。
+- **不阻塞启动**：绑不上去不是故障状态。VPN / Tailscale 没起、端口被别人占着时，插件只打印一行 `waiting to serve …` 并进入退避重试（接口类 5s→15s，端口类 5s→60s），地址一出现就自动接上并补一行 `bound …`；dsh 的启动与关闭都不受影响。
 - **版本**：需要 dsh >= 0.1.7（配置段由行 id 派生、浏览器半用 `configForms`）。旧版的 `settings.yaml` 已被 0.1.7 归档为 `settings.yaml.imported`。
 
 ## 安装
@@ -104,7 +105,7 @@ node test/run.mjs      # 代理核心：白名单、重写、转发、拒绝
 node test/client.mjs   # 浏览器半：模块装载 + 面板状态机（草稿/保存/冲突）
 ```
 
-覆盖：白名单匹配（IPv4/IPv6/CIDR/映射地址/回环）、非法配置拒绝启动、Host/Origin 重写与跨站不放行、HTTP 透传、SSE 流式转发、WebSocket 升级转发与拒绝、403 拦截；客户端模块在打桩的 `window.__ModuleLoader__` 下装配，覆盖行 id 表单绑定、两个插槽的注册、暂存、revision 栅栏保存、冲突提示、Discard/Reset 与白名单行校验。
+覆盖：白名单匹配（IPv4/IPv6/CIDR/映射地址/回环）、非法配置拒绝启动、暂时性绑定失败的退避与自动恢复（端口被占 → 释放后自行接上）、Host/Origin 重写与跨站不放行、HTTP 透传、SSE 流式转发、WebSocket 升级转发与拒绝、403 拦截；客户端模块在打桩的 `window.__ModuleLoader__` 下装配，覆盖行 id 表单绑定、两个插槽的注册、暂存、revision 栅栏保存、冲突提示、Discard/Reset 与白名单行校验。
 
 （测试直接 import 插件源码，需要能解析 `@deepseek-ai/schemastery`；在 profile 内运行，或临时软链该包到本地 `node_modules/`。）
 
