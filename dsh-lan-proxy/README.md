@@ -72,6 +72,16 @@ cp -r dsh-plugin-pack/dsh-lan-proxy ~/.dsh/profiles/web/node_modules/
 | `targetHost` | `127.0.0.1` | 被代理的 Web 服务地址 |
 | `targetPort` | `0` | 被代理的 Web 服务端口；`0` 表示跟随组合中 `webServer` 实际绑定的端口 |
 
+启动成功后日志会打印（前缀 `[dsh-lan-proxy]`，浏览器半的告警用同一前缀）：
+
+```
+[dsh-lan-proxy] listening on 100.64.0.1:3081 → 127.0.0.1:3080
+[dsh-lan-proxy] allowed sources: 100.64.0.1, 100.64.0.4
+[dsh-lan-proxy] LAN: http://100.64.0.1:3081/?token=<进程令牌>
+```
+
+把打印出来的 `LAN:` URL 在远程设备上打开即可完成认证（与本机 URL 使用同一套 `?token=` 换 cookie 机制）。绑不上时不是故障状态：`waiting to serve …` 打印一行后进入退避重试，地址一出现即补一行 `bound …`。
+
 > **升级提示**：dsh 0.1.7 取消了旧版 `~/.dsh/settings.yaml`，其内容会被自动改名归档为 `settings.yaml.imported`。旧版本写入的 `lan-proxy:` 段对应不上新的行 id，需要按上表改写到 `cordis.patch.yml`（或直接用面板重新填一次）。
 
 ## Settings 面板（无需手改配置文件）

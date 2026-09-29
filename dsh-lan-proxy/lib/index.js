@@ -40,8 +40,9 @@ const name = 'dsh-lan-proxy'
  * id — the browser half edits that section through `configForms.get(ENTRY_ID)`.
  */
 const ENTRY_ID = name
-/** Prefix on every line this plugin prints. */
-const LOG_PREFIX = '[lan-proxy]'
+/** Prefix on every line this plugin prints (the package/row name, so the
+ *  browser half and the Host log are greppable under the same string). */
+const LOG_PREFIX = '[dsh-lan-proxy]'
 /** How long `waitForTargetPort` waits for the Web server to bind before giving up. */
 const TARGET_PORT_TIMEOUT_MS = 15000
 /** Delay between target-port polls. */

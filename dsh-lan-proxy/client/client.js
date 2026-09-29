@@ -408,7 +408,7 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     targetHostHint: "The Web server being proxied (loopback).",
     targetPort: "Target port",
     targetPortHint: "0 follows the composed Web server's actual port.",
-    footer: "The Host log reports proxy status with the [lan-proxy] prefix; invalid entries keep it closed.",
+    footer: "The Host log reports proxy status with the [dsh-lan-proxy] prefix; invalid entries keep it closed.",
     unsaved: "Unsaved",
     save: "Save",
     saving: "Saving…",
@@ -446,7 +446,7 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     targetHostHint: "被代理的 Web 服务地址（回环）。",
     targetPort: "目标端口",
     targetPortHint: "填 0 表示跟随组合中 Web 服务实际端口。",
-    footer: "代理状态见 Host 日志的 [lan-proxy] 前缀；条目非法时保持关闭。",
+    footer: "代理状态见 Host 日志的 [dsh-lan-proxy] 前缀；条目非法时保持关闭。",
     unsaved: "未保存",
     save: "保存",
     saving: "保存中…",
@@ -577,6 +577,7 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     const t = props.t;
     const [model] = React.useState(() => new CardModel(form));
     React.useEffect(() => () => model.dispose(), [model]);
+    const warned = React.useRef(undefined);
     const view = React.useSyncExternalStore(
       (listener) => model.subscribe(listener),
       () => model.view,
@@ -588,7 +589,14 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     // SlotErrorBoundary turns any throw into an invisible empty div, so a
     // missing section is reported here rather than swallowed.
     if (!view.available) {
-      console.warn(`[dsh-lan-proxy] settings section unavailable (status: ${view.status}, mode: ${view.mode})`);
+      // The one console line worth keeping: a page that cannot be edited is
+      // abnormal, and the form status is what makes it explainable. Logged
+      // once per distinct reason so re-renders cannot turn it into a flood.
+      const reason = `${view.status}/${view.mode}`;
+      if (warned.current !== reason) {
+        warned.current = reason;
+        console.warn(`[dsh-lan-proxy] settings section unavailable (status: ${view.status}, mode: ${view.mode})`);
+      }
       return React.createElement(
         "div",
         { style: T.card },
@@ -722,9 +730,6 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
 
   function apply(ctx) {
     const t = ctx.locale.bind(NS);
-    // One breadcrumb per half: this page has no other visible surface, so the
-    // console is where a missing settings page has to be explained from.
-    console.info(`[dsh-lan-proxy] browser half active (entry "${ENTRY_ID}")`);
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-lan-proxy: dictionaries");
     const form = ctx.configForms.get(ENTRY_ID);
     // One form, two homes: the Plugins settings tab and the Plugins manager
@@ -741,7 +746,6 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
       () => {
         const offTab = ctx.slots.inject("settings.plugins.tab", register("settings.plugins.tab"));
         const offItem = ctx.slots.inject("plugins.item", register("plugins.item"));
-        console.info(`[dsh-lan-proxy] settings pages registered in settings.plugins.tab and plugins.item`);
         return () => {
           offTab();
           offItem();
