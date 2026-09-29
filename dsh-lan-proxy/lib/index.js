@@ -34,8 +34,12 @@ import z from '@deepseek-ai/schemastery'
 
 /** Stable Cordis plugin name. */
 const name = 'dsh-lan-proxy'
-/** Settings namespace carrying this plugin's configuration. */
-const NAMESPACE = 'lan-proxy'
+/**
+ * Row id declared in `cordis.patch.yml`. Since dsh 0.1.7 the Host derives one
+ * settings section per active entry from its exported `Config`, keyed by this
+ * id — the browser half edits that section through `configForms.get(ENTRY_ID)`.
+ */
+const ENTRY_ID = name
 /** Prefix on every line this plugin prints. */
 const LOG_PREFIX = '[lan-proxy]'
 /** How long `waitForTargetPort` waits for the Web server to bind before giving up. */
@@ -44,6 +48,12 @@ const TARGET_PORT_TIMEOUT_MS = 15000
 const TARGET_PORT_POLL_MS = 100
 /** Maximum LAN URLs printed on one banner (one line each, keeps the boot log short). */
 const MAX_BANNER_URLS = 6
+/**
+ * Close started by the previous fiber instance. dsh restarts a row on every
+ * configuration change, and a disposer cannot be awaited, so the next bind
+ * waits for it instead of racing its own predecessor on the same port.
+ */
+let closing = Promise.resolve()
 
 /**
  * Composition/settings schema for this plugin. Every field has a default, so
@@ -513,15 +523,13 @@ async function startProxy(options) {
 
 /** Read this plugin's current configuration through a `source()` sink. */
 function applyPlugin(ctx, entryConfig) {
-  let current = () => entryConfig
   let generation = 0
   /** Active listener as `{ handle, config, targetPort, urlsPrinted }`, or null. */
   let listener = null
   const log = (message) => console.log(`${LOG_PREFIX} ${message}`)
 
   const targetPortNow = () => {
-    const config = current()
-    if (config.targetPort > 0) return config.targetPort
+    if (entryConfig.targetPort > 0) return entryConfig.targetPort
     const port = ctx.get('webServer')?.port
     return typeof port === 'number' && port > 0 ? port : undefined
   }
@@ -567,7 +575,7 @@ function applyPlugin(ctx, entryConfig) {
 
   const reconfigure = async () => {
     const mine = ++generation
-    const config = current()
+    const config = entryConfig
     const previous = listener
     listener = null
     if (previous !== null) {
@@ -575,7 +583,7 @@ function applyPlugin(ctx, entryConfig) {
       if (mine !== generation) return
     }
     if (config.enabled !== true) {
-      log('disabled (settings: lan-proxy.enabled)')
+      log('disabled (config: dsh-lan-proxy.enabled)')
       return
     }
     const { rules, errors } = compileAllowlist(config.allow)
@@ -585,7 +593,7 @@ function applyPlugin(ctx, entryConfig) {
       return
     }
     if (rules.length === 0 && !isLoopbackBind(config.host)) {
-      log(`refusing to start: bind ${config.host} is not loopback and allow[] is empty — add the source IPs/CIDRs you want to open (settings: lan-proxy.allow)`)
+      log(`refusing to start: bind ${config.host} is not loopback and allow[] is empty — add the source IPs/CIDRs you want to open (config: dsh-lan-proxy.allow)`)
       return
     }
     const targetPort = await waitForTargetPort(mine)
@@ -594,6 +602,8 @@ function applyPlugin(ctx, entryConfig) {
       log(`target ${config.targetHost} port never became available; not starting`)
       return
     }
+    await closing
+    if (mine !== generation) return
     let handle
     try {
       handle = await startProxy({
@@ -616,6 +626,9 @@ function applyPlugin(ctx, entryConfig) {
     printBanner(config, handle, targetPort)
   }
 
+  // Configuration now arrives as this entry's resolved Config: dsh 0.1.7
+  // derives the settings section from the exported schema and restarts the
+  // fiber when a value changes, so a fresh apply is the hot-reload path.
   ctx.inject(['webServer'], () => {
     void reconfigure()
   })
@@ -624,27 +637,13 @@ function applyPlugin(ctx, entryConfig) {
   ctx.inject(['connection'], () => {
     printLanUrls()
   })
-  ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, NAMESPACE, Config, entryConfig, {
-      setSource: (source) => {
-        current = source
-      },
-      onChange: () => {
-        void reconfigure()
-      },
-    })
-  })
-  if (ctx.get('settings') === undefined) {
-    // No settings service (or it arrives later): the composed entry stands.
-    void reconfigure()
-  }
 
   ctx.effect(
     () => () => {
       generation++
       const active = listener
       listener = null
-      if (active !== null) void active.handle.close()
+      if (active !== null) closing = active.handle.close()
     },
     'lan-proxy listener',
   )
@@ -663,7 +662,7 @@ function apply(ctx, entryConfig = {}) {
 
 export {
   Config,
-  NAMESPACE,
+  ENTRY_ID,
   apply,
   assertStartable,
   bitsMatch,
