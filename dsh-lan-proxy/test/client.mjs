@@ -122,6 +122,7 @@ await test('module exports the cordis plugin surface', () => {
 await test('apply edits the entry form and registers both pages', () => {
   const form = makeForm()
   const captured = { get: null, served: null, injected: [], registered: [], dictionaries: null, effects: 0 }
+  const unserved = { whileServed: false }
   const ctx = {
     effect(fn) {
       captured.effects++
@@ -142,6 +143,9 @@ await test('apply edits the entry form and registers both pages', () => {
         return form
       },
       whileServed(namespaces, register) {
+        // The page must not depend on this gate any more: it used to make a
+        // missing tab look like a missing plugin.
+        unserved.whileServed = true
         captured.served = namespaces
         return register(new Set(namespaces))
       },
@@ -161,7 +165,7 @@ await test('apply edits the entry form and registers both pages', () => {
 
   // The form is the Host section of this very entry, not a legacy namespace.
   assert.equal(captured.get, 'dsh-lan-proxy')
-  assert.deepEqual(captured.served, ['dsh-lan-proxy'])
+  assert.equal(unserved.whileServed, false, 'registration does not wait for the section')
   assert.equal(captured.dictionaries.ns, 'settings.lanProxy')
   assert.ok(captured.dictionaries.dict.zh.title)
   assert.ok(captured.dictionaries.dict.en.title)

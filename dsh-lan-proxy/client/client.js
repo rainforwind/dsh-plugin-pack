@@ -3,8 +3,9 @@
 // Where it shows up (dsh >= 0.1.7):
 //   * Settings → Plugins → “LAN Proxy” tab, and
 //   * the Plugins manager page, as the item of the same plugin.
-// Both come from one registration pair, gated by `configForms.whileServed` so
-// nothing appears while the Host does not serve the namespace.
+// Both come from one registration pair, registered unconditionally: a form the
+// Host does not serve renders its own explanation rather than the page quietly
+// disappearing.
 //
 // Contract facts this file is built on (verified against 0.1.7-rc.2):
 //   - The Host derives one settings section per active entry from its exported
@@ -374,7 +375,8 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
       const fields = draft !== null ? draft : draftFromValue(snapshot.value);
       const validation = draft !== null ? validateDraft(draft) : { ok: true, errors: {} };
       return {
-        available: snapshot.status !== "unavailable",
+        status: snapshot.status,
+        available: snapshot.status === "ready" || snapshot.status === "loading",
         writable: snapshot.status === "ready" && snapshot.writable === true,
         mode: snapshot.mode ?? "host",
         dirty: draft !== null,
@@ -414,6 +416,7 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     reset: "Reset to defaults",
     readOnly: "These settings are read-only right now.",
     notServed: "The Host is not serving this plugin's configuration section yet — reload the page once the plugin row is active.",
+    notServedStatus: "form status: {status} (persistence: {mode})",
     notServedRemote: "This page cannot edit the configuration: dsh keeps settings in memory on a non-loopback page. Open the local dsh web URL instead.",
     readOnlyRemote: "Settings are read-only on a non-loopback page — open the local dsh web URL to edit.",
     conflict: "The saved settings changed elsewhere — your edits are kept; review them before saving.",
@@ -451,6 +454,7 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     reset: "恢复默认值",
     readOnly: "当前为只读状态。",
     notServed: "Host 尚未提供本插件的配置段 —— 插件行生效后刷新一次页面即可。",
+    notServedStatus: "表单状态：{status}（持久化：{mode}）",
     notServedRemote: "当前页面无法编辑该配置：dsh 在非回环页面上把设置只放在进程内。请改用本机 dsh web 地址打开。",
     readOnlyRemote: "非回环页面上的设置只读 —— 请在本机 dsh web 地址中编辑。",
     conflict: "已保存的配置在别处发生了变化 —— 你的修改已保留，请确认后再保存。",
@@ -584,7 +588,7 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     // SlotErrorBoundary turns any throw into an invisible empty div, so a
     // missing section is reported here rather than swallowed.
     if (!view.available) {
-      console.warn(`[lan-proxy] settings section unavailable (mode: ${view.mode})`);
+      console.warn(`[lan-proxy] settings section unavailable (status: ${view.status}, mode: ${view.mode})`);
       return React.createElement(
         "div",
         { style: T.card },
@@ -592,6 +596,11 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
           "p",
           { style: T.warn, role: "status" },
           view.mode === "memory" ? t("notServedRemote") : t("notServed"),
+        ),
+        React.createElement(
+          "p",
+          { style: T.hint },
+          format(t("notServedStatus"), { status: view.status, mode: view.mode }),
         ),
       );
     }
@@ -726,17 +735,20 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
       console.info(`[lan-proxy] registered "${ITEM_ID}" in ${slot}`);
       return off;
     };
+    // Registered unconditionally on purpose. The page ships with the bundle, and
+    // a form whose section the Host is not serving renders its own explanation
+    // (see `notServed`); gating the registration on `whileServed` instead made a
+    // missing tab indistinguishable from a missing plugin, with no way to tell
+    // the user which half was at fault.
     ctx.effect(
-      () =>
-        ctx.configForms.whileServed([ENTRY_ID], () => {
-          console.info(`[lan-proxy] Host serves "${ENTRY_ID}"; opening the settings pages`);
-          const offTab = ctx.slots.inject("settings.plugins.tab", register("settings.plugins.tab"));
-          const offItem = ctx.slots.inject("plugins.item", register("plugins.item"));
-          return () => {
-            offTab();
-            offItem();
-          };
-        }),
+      () => {
+        const offTab = ctx.slots.inject("settings.plugins.tab", register("settings.plugins.tab"));
+        const offItem = ctx.slots.inject("plugins.item", register("plugins.item"));
+        return () => {
+          offTab();
+          offItem();
+        };
+      },
       "dsh-lan-proxy: configuration pages",
     );
   }
