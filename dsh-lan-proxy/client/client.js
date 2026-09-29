@@ -584,6 +584,7 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     // SlotErrorBoundary turns any throw into an invisible empty div, so a
     // missing section is reported here rather than swallowed.
     if (!view.available) {
+      console.warn(`[lan-proxy] settings section unavailable (mode: ${view.mode})`);
       return React.createElement(
         "div",
         { style: T.card },
@@ -712,16 +713,23 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
 
   function apply(ctx) {
     const t = ctx.locale.bind(NS);
+    // Breadcrumbs: this half has no other visible surface, so the console is
+    // where a missing settings page has to be explained from.
+    console.info(`[lan-proxy] client half active, waiting for the Host to serve "${ENTRY_ID}"`);
     ctx.effect(() => ctx.locale.register(NS, { zh, en }), "dsh-lan-proxy: dictionaries");
     const form = ctx.configForms.get(ENTRY_ID);
     // One form, two homes: the Plugins settings tab and the Plugins manager
     // item. Both appear and disappear together with the served section.
     const page = (props) => React.createElement(Card, { form, t, view: props.view });
-    const register = (slot) => () =>
-      ctx.slots.register({ name: slot, id: ITEM_ID, order: 20, label: () => t("title"), locale: NS }, page);
+    const register = (slot) => () => {
+      const off = ctx.slots.register({ name: slot, id: ITEM_ID, order: 20, label: () => t("title"), locale: NS }, page);
+      console.info(`[lan-proxy] registered "${ITEM_ID}" in ${slot}`);
+      return off;
+    };
     ctx.effect(
       () =>
         ctx.configForms.whileServed([ENTRY_ID], () => {
+          console.info(`[lan-proxy] Host serves "${ENTRY_ID}"; opening the settings pages`);
           const offTab = ctx.slots.inject("settings.plugins.tab", register("settings.plugins.tab"));
           const offItem = ctx.slots.inject("plugins.item", register("plugins.item"));
           return () => {
