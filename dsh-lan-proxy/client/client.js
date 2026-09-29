@@ -413,6 +413,8 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     discard: "Discard",
     reset: "Reset to defaults",
     readOnly: "These settings are read-only right now.",
+    notServed: "The Host is not serving this plugin's configuration section yet — reload the page once the plugin row is active.",
+    notServedRemote: "This page cannot edit the configuration: dsh keeps settings in memory on a non-loopback page. Open the local dsh web URL instead.",
     readOnlyRemote: "Settings are read-only on a non-loopback page — open the local dsh web URL to edit.",
     conflict: "The saved settings changed elsewhere — your edits are kept; review them before saving.",
     failed: "The write was refused (settings moved on). Review the values and try again.",
@@ -448,6 +450,8 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     discard: "放弃",
     reset: "恢复默认值",
     readOnly: "当前为只读状态。",
+    notServed: "Host 尚未提供本插件的配置段 —— 插件行生效后刷新一次页面即可。",
+    notServedRemote: "当前页面无法编辑该配置：dsh 在非回环页面上把设置只放在进程内。请改用本机 dsh web 地址打开。",
     readOnlyRemote: "非回环页面上的设置只读 —— 请在本机 dsh web 地址中编辑。",
     conflict: "已保存的配置在别处发生了变化 —— 你的修改已保留，请确认后再保存。",
     failed: "写入被拒绝（配置已被改动），请确认后重试。",
@@ -576,7 +580,20 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     // The Plugins manager renders this slot twice: a one-liner in the list
     // (`summary`) and the real page once the card is opened.
     if (props.view === "summary") return t("description");
-    if (!view.available) return null;
+    // A panel that explains itself beats a blank one: the renderer's
+    // SlotErrorBoundary turns any throw into an invisible empty div, so a
+    // missing section is reported here rather than swallowed.
+    if (!view.available) {
+      return React.createElement(
+        "div",
+        { style: T.card },
+        React.createElement(
+          "p",
+          { style: T.warn, role: "status" },
+          view.mode === "memory" ? t("notServedRemote") : t("notServed"),
+        ),
+      );
+    }
 
     const fields = view.fields;
     const controlsDisabled = !view.writable || view.saving;
