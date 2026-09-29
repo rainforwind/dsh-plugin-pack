@@ -64,20 +64,28 @@ let closing = Promise.resolve()
 /**
  * Composition/settings schema for this plugin. Every field has a default, so
  * an unconfigured row mounts inert (`enabled: false`) and never opens a port.
+ *
+ * Every field is marked `.volatile()` on purpose. The Host projects one
+ * settings section per entry from this schema, and its projection
+ * (`volatileForm`) keeps a whole schema only when the root is volatile, or
+ * keeps just the volatile children of an object — so a flat schema of plain
+ * scalars projects to nothing and the entry is dropped from `settings.describe`
+ * entirely. Marking the fields is what puts this row in the Settings UI; the
+ * shipped companions (web search, shell, agent loop) mark theirs the same way.
  */
 const Config = z.object({
   /** Start the proxy when true; false keeps this plugin entirely passive. */
-  enabled: z.boolean().default(false),
+  enabled: z.boolean().default(false).volatile(),
   /** Bind address of the proxy listener (`0.0.0.0`, a LAN/Tailscale IP, …). */
-  host: z.string().default('0.0.0.0'),
+  host: z.string().default('0.0.0.0').volatile(),
   /** Bind port of the proxy listener; 0 lets the OS pick one. */
-  port: z.natural().max(65535).default(3081),
+  port: z.natural().max(65535).default(3081).volatile(),
   /** Source addresses allowed through: exact IPs or CIDRs (`100.64.0.5`, `100.64.0.0/10`). */
-  allow: z.array(z.string()).default([]),
+  allow: z.array(z.string()).default([]).volatile(),
   /** Target host of the proxied Web server. */
-  targetHost: z.string().default('127.0.0.1'),
+  targetHost: z.string().default('127.0.0.1').volatile(),
   /** Target port; 0 follows the composed Web server's actual bound port. */
-  targetPort: z.natural().max(65535).default(0),
+  targetPort: z.natural().max(65535).default(0).volatile(),
 })
 
 //#region address parsing / matching
@@ -578,8 +586,39 @@ function addressPending(code) {
   return code === 'EADDRNOTAVAIL' || code === 'EAFNOSUPPORT' || code === 'ENETDOWN' || code === 'ENETUNREACH'
 }
 
-/** Read this plugin's current configuration through a `source()` sink. */
-function applyPlugin(ctx, entryConfig) {
+/**
+ * Read one configuration field. A `.volatile()` field arrives as a live cell
+ * whose value is resolved on demand (that is how the Host projects it into the
+ * settings document); a plain field arrives as its value, so both shapes work.
+ * @param cell - the field as the Loader handed it to `apply`.
+ * @returns the field's current value.
+ */
+function readField(cell) {
+  return cell !== null && typeof cell === 'object' && typeof cell.get === 'function' ? cell.get() : cell
+}
+
+/**
+ * Snapshot the row's configuration into the plain shape the proxy works with.
+ * Read fresh on every use, so a settings save (which restarts this fiber) and
+ * a reconfigure always agree.
+ * @param config - the configuration the Loader handed to `apply`.
+ * @returns `{ enabled, host, port, allow, targetHost, targetPort }`.
+ */
+function currentConfig(config) {
+  const source = config && typeof config === 'object' ? config : {}
+  const allow = readField(source.allow)
+  return {
+    enabled: readField(source.enabled) === true,
+    host: String(readField(source.host) ?? '0.0.0.0'),
+    port: Number(readField(source.port) ?? 3081),
+    allow: Array.isArray(allow) ? allow.map(String) : [],
+    targetHost: String(readField(source.targetHost) ?? '127.0.0.1'),
+    targetPort: Number(readField(source.targetPort) ?? 0),
+  }
+}
+
+/** Mount the proxy for one row instance. */
+function applyPlugin(ctx, config) {
   let generation = 0
   /** Active listener as `{ handle, config, targetPort, urlsPrinted }`, or null. */
   let listener = null
@@ -604,7 +643,8 @@ function applyPlugin(ctx, entryConfig) {
   const scheduleRetry = (reason, cap = RETRY_MAX_MS) => {
     if (waiting !== reason) {
       waiting = reason
-      const where = entryConfig.port > 0 ? formatAuthority(entryConfig.host, entryConfig.port) : String(entryConfig.host)
+      const config = current()
+      const where = config.port > 0 ? formatAuthority(config.host, config.port) : String(config.host)
       log(`waiting to serve ${where}: ${reason}`)
     }
     const delay = retryDelay
@@ -617,8 +657,9 @@ function applyPlugin(ctx, entryConfig) {
     retry.unref?.()
   }
 
+  const current = () => currentConfig(config)
   const targetPortNow = () => {
-    if (entryConfig.targetPort > 0) return entryConfig.targetPort
+    if (current().targetPort > 0) return current().targetPort
     const port = ctx.get('webServer')?.port
     return typeof port === 'number' && port > 0 ? port : undefined
   }
@@ -664,7 +705,7 @@ function applyPlugin(ctx, entryConfig) {
 
   const reconfigure = async () => {
     const mine = ++generation
-    const config = entryConfig
+    const config = current()
     const previous = listener
     listener = null
     if (previous !== null) {
@@ -754,11 +795,12 @@ function applyPlugin(ctx, entryConfig) {
 
 /**
  * Mount the proxy.
- * @param ctx - plugin context (webServer/settings/connection read optionally).
- * @param entryConfig - composition entry configuration for this row.
+ * @param ctx - plugin context (webServer/connection read optionally).
+ * @param config - this row's resolved configuration; `.volatile()` fields are
+ *   live cells read through {@link readField}.
  */
-function apply(ctx, entryConfig = {}) {
-  applyPlugin(ctx, Config(entryConfig ?? {}))
+function apply(ctx, config = {}) {
+  applyPlugin(ctx, config)
 }
 
 //#endregion
@@ -766,6 +808,7 @@ function apply(ctx, entryConfig = {}) {
 export {
   Config,
   ENTRY_ID,
+  currentConfig,
   addressPending,
   apply,
   assertStartable,

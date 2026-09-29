@@ -6,12 +6,14 @@
 import assert from 'node:assert/strict'
 import { createServer, request as httpRequest } from 'node:http'
 import { connect as netConnect } from 'node:net'
+import z from '@deepseek-ai/schemastery'
 import {
   Config,
   addressPending,
   apply,
   assertStartable,
   compileAllowlist,
+  currentConfig,
   matchesAllowlist,
   nextRetryDelay,
   normalizeIp,
@@ -146,13 +148,24 @@ await test('request header rewrite: Host/Origin to loopback, cross-origin untouc
 })
 
 await test('composition schema defaults and bounds', () => {
-  const defaults = Config({})
+  // Fields are `.volatile()`, so the Loader hands over live cells; the reader
+  // is what the plugin itself uses, which is what these assertions pin down.
+  const defaults = currentConfig(Config({}))
   assert.equal(defaults.enabled, false)
   assert.equal(defaults.host, '0.0.0.0')
   assert.equal(defaults.port, 3081)
   assert.deepEqual(defaults.allow, [])
+  assert.equal(defaults.targetHost, '127.0.0.1')
   assert.equal(defaults.targetPort, 0)
   assert.throws(() => Config({ port: 65536 }))
+})
+
+await test('a plain (non-volatile) configuration is read the same way', () => {
+  const plain = currentConfig({ enabled: true, host: '100.64.0.1', port: 3081, allow: ['10.0.0.1'] })
+  assert.equal(plain.enabled, true)
+  assert.equal(plain.host, '100.64.0.1')
+  assert.deepEqual(plain.allow, ['10.0.0.1'])
+  assert.equal(plain.targetPort, 0, 'absent fields fall back to the schema defaults')
 })
 
 // ── integration: mock target + live proxy ──────────────────────────────────
@@ -401,6 +414,34 @@ await test('a missing interface is retried tightly, a busy port lazily', () => {
   assert.equal(addressPending('EADDRINUSE'), false)
   assert.equal(addressPending('EACCES'), false)
   assert.equal(addressPending(undefined), false)
+})
+
+// ── the settings projection contract ─────────────────────────────────────────
+
+/**
+ * The Host rule from `@deepseek-ai/dsh-settings` (`volatileForm`): a whole
+ * schema survives when its root is volatile, otherwise only the children that
+ * are themselves volatile objects survive. A schema that projects to nothing
+ * takes the entire entry out of `settings.describe`, which is what makes a
+ * configuration page silently disappear.
+ */
+function volatileForm(schema) {
+  if (schema.meta.volatile) return schema
+  if (schema.type !== 'object') return undefined
+  const dict = Object.fromEntries(Object.entries(schema.dict ?? {}).flatMap(([key, child]) => {
+    const field = volatileForm(child)
+    return field === undefined ? [] : [[key, field]]
+  }))
+  return Object.keys(dict).length === 0 ? undefined : z.object(dict)
+}
+
+await test('every Config field is projected into the settings section', () => {
+  const form = volatileForm(Config)
+  assert.ok(form, 'the Host projects this row at all')
+  assert.deepEqual(
+    Object.keys(form.dict).sort(),
+    ['allow', 'enabled', 'host', 'port', 'targetHost', 'targetPort'],
+  )
 })
 
 // ── the listener waits instead of giving up ─────────────────────────────────
