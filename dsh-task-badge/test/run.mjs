@@ -200,6 +200,42 @@ await test('a job finishing in the session already on screen stays invisible', a
   assert.equal((await counts(routes)).unviewedJobs, 0)
 })
 
+await test('several finished jobs in one session count once', async () => {
+  const jobs = makeJobs()
+  const { routes } = makeHost({ jobs })
+  jobs.fire({ type: 'settled', job: { id: 'bash-7', status: 'completed', owner: 'ses-A', startedAt: 1, finishedAt: 2 } })
+  jobs.fire({ type: 'settled', job: { id: 'bash-8', status: 'completed', owner: 'ses-A', startedAt: 1, finishedAt: 3 } })
+
+  const out = await counts(routes)
+  assert.equal(out.unviewedJobs, 1, 'two jobs in one session are one thing to look at')
+  assert.deepEqual(out.unviewedJobSessionIds, ['ses-A'])
+})
+
+await test("a session's finished job never doubles its own unread badge", async () => {
+  const jobs = makeJobs()
+  const { ctx, routes } = makeHost({ jobs })
+  ctx.emit('api-session/status', 'ses-A', true)
+  ctx.emit('api-session/status', 'ses-A', false)   // ses-A is now unread
+  jobs.fire({ type: 'settled', job: { id: 'bash-9', status: 'completed', owner: 'ses-A', startedAt: 1, finishedAt: 2 } })
+
+  const out = await counts(routes)
+  assert.deepEqual(out.unreadSessionIds, ['ses-A'])
+  assert.equal(out.unviewedJobs, 0, 'the unread badge already covers this session')
+  assert.deepEqual(out.unviewedJobSessionIds, [])
+})
+
+await test('an unread session and a job in another session stay two counts', async () => {
+  const jobs = makeJobs()
+  const { ctx, routes } = makeHost({ jobs })
+  ctx.emit('api-session/status', 'ses-A', false)
+  jobs.fire({ type: 'settled', job: { id: 'bash-10', status: 'completed', owner: 'ses-B', startedAt: 1, finishedAt: 2 } })
+
+  const out = await counts(routes)
+  assert.deepEqual(out.unreadSessionIds, ['ses-A'])
+  assert.equal(out.unviewedJobs, 1)
+  assert.deepEqual(out.unviewedJobSessionIds, ['ses-B'])
+})
+
 await test('a job being stopped still counts as running until it settles', async () => {
   const jobs = makeJobs()
   const { routes } = makeHost({ jobs })

@@ -93,7 +93,11 @@ function apply(ctx) {
   function getCounts() {
     try {
       let runningJobs = 0
-      const unviewed = []
+      // Unviewed jobs, deduplicated to one entry per owning session: two
+      // finished jobs in the same conversation are one thing to look at, and
+      // a session already sitting in `unreadSessions` carries its own badge,
+      // so its jobs must not push the total to 2.
+      const unviewedJobSessionIds = []
 
       jobMap.forEach((job, id) => {
         if (subagentSessions.has(job.owner)) return // subagent work, not the user's
@@ -108,7 +112,9 @@ function apply(ctx) {
         if (!job.owner) return
         if (viewedJobIds.has(id)) return
         if (job.owner === viewedSessionId) return // already on screen
-        unviewed.push({ id: id, owner: job.owner })
+        if (unreadSessions.has(job.owner)) return // that session's own badge covers it
+        if (unviewedJobSessionIds.indexOf(job.owner) >= 0) return // one session, one count
+        unviewedJobSessionIds.push(job.owner)
       })
 
       let runningSessions = 0
@@ -121,18 +127,11 @@ function apply(ctx) {
         if (!subagentSessions.has(id)) unreadSessionIds.push(id)
       })
 
-      // Owners of those jobs, so a click can jump to the session holding them.
-      const unviewedJobSessionIds = []
-      for (let i = 0; i < unviewed.length; i++) {
-        const owner = unviewed[i].owner
-        if (unviewedJobSessionIds.indexOf(owner) < 0) unviewedJobSessionIds.push(owner)
-      }
-
       return {
         running: runningSessions + runningJobs,
         // Return the actual session IDs so client can manage read/unread locally
         unreadSessionIds,
-        unviewedJobs: unviewed.length,
+        unviewedJobs: unviewedJobSessionIds.length,
         unviewedJobSessionIds
       }
     } catch (e) {
