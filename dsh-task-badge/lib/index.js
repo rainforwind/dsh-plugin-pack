@@ -8,29 +8,35 @@ function apply(ctx) {
   console.log('[task-badge] Host apply() called')
 
   const jobs = ctx.get('jobs')
-  if (jobs === undefined) {
-    console.log('[task-badge] jobs service not available')
-    return
-  }
 
   // === Session tracking ===
   const activeSessions = new Set()      // session ids currently processing
   const unreadSessions = new Set()      // session ids with unread responses
   const subagentSessions = new Set()    // session ids belonging to subagents (excluded from counts)
+  let viewedSessionId = null            // last session the client said it is looking at
 
-  // Track subagent lifecycle to filter them out
+  // === Background job tracking ===
+  const jobMap = new Map()              // job id -> { status, owner }
+  const viewedJobIds = new Set()        // jobs whose owning session has been opened
+
+  // Track subagent lifecycle to filter them out.
+  // The payload is `{ runId, provider, id, local }` and `id` is the child's
+  // *session* id — there is no `sessionId` field, so reading one never matched
+  // and every child session kept counting as the user's own unread.
+  // Entries are deliberately never removed on `subagent/end`: the child's final
+  // `api-session/status` may still arrive afterwards, and dropping the marker
+  // first would let it land in `unreadSessions` for good. Ids are unique, so a
+  // retained entry can never match a real conversation later.
   ctx.on('subagent/start', (info) => {
-    if (info && info.sessionId) {
-      subagentSessions.add(info.sessionId)
-      console.log('[task-badge] subagent started:', info.sessionId)
-    }
-  })
-  ctx.on('subagent/end', (info) => {
-    if (info && info.sessionId) {
-      subagentSessions.delete(info.sessionId)
-      console.log('[task-badge] subagent ended:', info.sessionId)
-    }
-  })
+    const id = info && info.id
+    if (!id) return
+    if (subagentSessions.has(id)) return
+    subagentSessions.add(id)
+    // Learned late: drop anything already recorded for this child.
+    activeSessions.delete(id)
+    unreadSessions.delete(id)
+    console.log('[task-badge] subagent started:', id)
+  }, { global: true })
 
   ctx.on('api-session/status', (sessionId, running) => {
     if (subagentSessions.has(sessionId)) return // skip subagent sessions
@@ -47,40 +53,90 @@ function apply(ctx) {
     unreadSessions.add(sessionId)
   })
 
-  // Client tells host it viewed a session → remove from unread
+  // Client tells host which session it viewed → remove from unread, and read
+  // the background jobs that session owns on the way through.
   function markViewed(sessionId) {
-    if (sessionId) unreadSessions.delete(sessionId)
+    viewedSessionId = sessionId || null
+    if (!sessionId) return
+    unreadSessions.delete(sessionId)
+    jobMap.forEach((job, id) => {
+      if (job.owner === sessionId) viewedJobIds.add(id)
+    })
   }
 
-  // === Background job tracking ===
-  const jobMap = new Map()
-  const viewedJobIds = new Set()
-
-  try {
-    jobs.onJobsChanged((jobList) => {
-      if (!jobList || !Array.isArray(jobList)) return
-      for (let i = 0; i < jobList.length; i++) {
-        const j = jobList[i]
-        if (j && j.id) jobMap.set(j.id, { id: j.id, status: j.status, reported: j.reported })
-      }
-    })
-  } catch (e) {}
+  // The registry exposes `jobs.events.subscribe({ owners }, listener)` — there
+  // is no `onJobsChanged`, so the old subscription threw into its catch and
+  // `jobMap` stayed empty forever (running jobs and unviewed jobs both
+  // counted as zero). `{ owners: 'all' }` delivers every owner's jobs, not
+  // just the unowned ones.
+  if (jobs && jobs.events && typeof jobs.events.subscribe === 'function') {
+    try {
+      jobs.events.subscribe({ owners: 'all' }, (event) => {
+        if (!event || event.type === 'output') return // no job record carried
+        const job = event.job
+        if (!job || !job.id) return
+        if (event.type === 'removed') {
+          jobMap.delete(job.id)
+          viewedJobIds.delete(job.id)
+          return
+        }
+        jobMap.set(job.id, { status: job.status, owner: job.owner })
+      })
+      console.log('[task-badge] job events subscribed')
+    } catch (e) {
+      console.log('[task-badge] job events unavailable:', String(e))
+    }
+  } else {
+    console.log('[task-badge] jobs service not available')
+  }
 
   function getCounts() {
     try {
-      let runningJobs = 0, unviewedJobs = 0
-      jobMap.forEach((j) => {
-        if (j.status === 'running') runningJobs++
-        else if (j.status === 'completed' && !j.reported && !viewedJobIds.has(j.id)) unviewedJobs++
+      let runningJobs = 0
+      const unviewed = []
+
+      jobMap.forEach((job, id) => {
+        if (subagentSessions.has(job.owner)) return // subagent work, not the user's
+        if (job.status === 'running' || job.status === 'stopping') {
+          runningJobs++
+          return
+        }
+        // A job counts as unread only until the user opens the session that
+        // owns it; an unowned job has no session to open, so it can never be
+        // cleared and is left out rather than sticking forever.
+        if (job.status !== 'completed') return
+        if (!job.owner) return
+        if (viewedJobIds.has(id)) return
+        if (job.owner === viewedSessionId) return // already on screen
+        unviewed.push({ id: id, owner: job.owner })
       })
+
+      let runningSessions = 0
+      activeSessions.forEach((id) => {
+        if (!subagentSessions.has(id)) runningSessions++
+      })
+
+      const unreadSessionIds = []
+      unreadSessions.forEach((id) => {
+        if (!subagentSessions.has(id)) unreadSessionIds.push(id)
+      })
+
+      // Owners of those jobs, so a click can jump to the session holding them.
+      const unviewedJobSessionIds = []
+      for (let i = 0; i < unviewed.length; i++) {
+        const owner = unviewed[i].owner
+        if (unviewedJobSessionIds.indexOf(owner) < 0) unviewedJobSessionIds.push(owner)
+      }
+
       return {
-        running: activeSessions.size + runningJobs,
+        running: runningSessions + runningJobs,
         // Return the actual session IDs so client can manage read/unread locally
-        unreadSessionIds: Array.from(unreadSessions),
-        unviewedJobs
+        unreadSessionIds,
+        unviewedJobs: unviewed.length,
+        unviewedJobSessionIds
       }
     } catch (e) {
-      return { running: 0, unreadSessionIds: [], unviewedJobs: 0 }
+      return { running: 0, unreadSessionIds: [], unviewedJobs: 0, unviewedJobSessionIds: [] }
     }
   }
 
@@ -129,7 +185,9 @@ function apply(ctx) {
         if (request.method === 'OPTIONS') { sendJson(response, 204, {}); return }
         if (request.method !== 'POST') { response.writeHead(405); response.end(); return }
         const body = await readBody(request)
-        markViewed(body.sessionId)
+        // `sessionId: null` is the client reporting that nothing is on screen;
+        // it releases the remembered session instead of clearing anything.
+        markViewed(body && body.sessionId)
         sendJson(response, 200, { ok: true })
       }
     })
