@@ -302,7 +302,7 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 
   // Start or join the run. Never throws: a failed start becomes a local failed
   // run record so the popover can show the reason instead of vanishing.
-  async function startRun(sessionId, buttonId) {
+  async function startRun(sessionId, buttonId, variant) {
     const skey = ctxKey(sessionId);
     try {
       const data = await postJson('/quick-actions/run', { buttonId, sessionId: sessionId == null ? null : sessionId });
@@ -324,9 +324,10 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
       });
     }
     // The expanded output view is already showing this run; a popover behind
-    // its mask would be invisible noise.
+    // its mask would be invisible noise. The popover belongs to the strip that
+    // opened it (header and sidebar share skeys on the main session).
     if (!(store.overlay && store.overlay.kind === 'output')) {
-      store.popover = { skey, sessionId, buttonId };
+      store.popover = { skey, sessionId, buttonId, variant };
     }
     notify();
   }
@@ -463,27 +464,49 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 
   const CSS = `
 .qa-strip{position:relative;display:flex;align-items:center;gap:4px;flex-wrap:wrap;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-.qa-btn{display:inline-flex;align-items:center;gap:5px;height:26px;max-width:220px;padding:0 9px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-tool-bar-fill);color:var(--dsw-alias-label-primary);font-size:12px;line-height:1;cursor:pointer;font-family:inherit}
-.qa-btn:hover{background:var(--dsw-alias-button-tool-bar-hover)}
+.qa-btn{display:inline-flex;align-items:center;gap:5px;height:26px;max-width:220px;padding:0 9px;border-radius:6px 0 0 6px;border:1px solid var(--dsw-alias-border-l2);background:var(--qa-tint, var(--dsw-alias-button-tool-bar-fill));color:var(--dsw-alias-label-primary);font-size:12px;line-height:1;cursor:pointer;font-family:inherit}
+.qa-btn:hover{background:var(--qa-tint-hover, var(--dsw-alias-button-tool-bar-hover))}
 .qa-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .qa-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--dsw-alias-label-tertiary)}
 .qa-dot[data-state="running"]{background:none;border:1.5px solid var(--dsw-alias-state-warn-primary);border-right-color:transparent;animation:qa-spin .9s linear infinite}
 .qa-dot[data-state="completed"]{background:var(--dsw-alias-state-success-primary)}
 .qa-dot[data-state="failed"],.qa-dot[data-state="killed"]{background:var(--dsw-alias-state-error-primary)}
-.qa-chev{width:18px;height:26px;padding:0;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);font-size:10px;cursor:pointer;margin-left:-3px;font-family:inherit}
-.qa-chev:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.qa-chev{width:18px;height:26px;padding:0;border-radius:0 6px 6px 0;border:1px solid var(--dsw-alias-border-l2);border-left:none;background:var(--qa-tint, transparent);color:var(--dsw-alias-label-secondary);font-size:10px;cursor:pointer;font-family:inherit}
+.qa-chev:hover{background:var(--qa-tint-hover, var(--dsw-alias-interactive-bg-hover))}
+/* Each scope carries its own light but saturated hue so global / workspace /
+   session chips are distinguishable at a glance: the state token mixed over
+   the LIGHT layer color — mixing over the gray toolbar fill only produced
+   gray-on-gray. Hover deepens the same hue; unknown scopes keep the neutral
+   fill. The chevron shares the cell tint and abuts the button — no left
+   border, square-off radii — so the two read as one split pill. */
+.qa-cell[data-scope="global"]{--qa-tint:color-mix(in srgb, var(--dsw-alias-state-business-primary) 20%, var(--dsw-alias-bg-layer-2));--qa-tint-hover:color-mix(in srgb, var(--dsw-alias-state-business-primary) 30%, var(--dsw-alias-bg-layer-2))}
+.qa-cell[data-scope="workspace"]{--qa-tint:color-mix(in srgb, var(--dsw-alias-state-success-primary) 20%, var(--dsw-alias-bg-layer-2));--qa-tint-hover:color-mix(in srgb, var(--dsw-alias-state-success-primary) 30%, var(--dsw-alias-bg-layer-2))}
+.qa-cell[data-scope="session"]{--qa-tint:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 20%, var(--dsw-alias-bg-layer-2));--qa-tint-hover:color-mix(in srgb, var(--dsw-alias-state-warn-primary) 30%, var(--dsw-alias-bg-layer-2))}
 .qa-add{min-width:24px;height:26px;padding:0 4px;border-radius:6px;border:1px dashed var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);font-size:14px;cursor:pointer;line-height:1;font-family:inherit}
 .qa-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .qa-empty{font-size:11px;color:var(--dsw-alias-label-tertiary);padding:0 4px}
 .qa-pop{position:absolute;top:calc(100% + 6px);right:0;z-index:60;width:min(440px,100%);max-width:78vw;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,.32);display:flex;flex-direction:column;overflow:hidden;text-align:left}
 .qa-strip[data-variant="sidebar"] .qa-pop{top:auto;bottom:calc(100% + 6px);left:0;right:auto}
+/* The footer slot container is a full-width flex row, but this strip as a flex
+   item sizes to its content — so the popover card was only as wide as the chip
+   row and the head's floor pushed the close button past the edge. Grow the
+   expanded strip into the leftover width (basis stays auto: never below
+   content); the compact rail opts out via :not(). */
+.qa-strip[data-variant="sidebar"]:not([data-compact="true"]){flex:1 1 auto;min-width:0}
 .qa-strip[data-compact="true"]{flex-direction:column;align-items:center;justify-content:center;row-gap:6px}
-.qa-strip[data-compact="true"] .qa-btn{padding:0 6px;max-width:none}
+.qa-strip[data-compact="true"] .qa-btn{padding:0 6px;max-width:none;border-radius:6px}
 .qa-strip[data-compact="true"] .qa-empty{display:none}
+/* The slot anchor is display:contents (inline), which drops both footer entries
+   straight into the sidebar's flex row — the global badge forced onto the same
+   line as our pills. In the collapsed rail, take OUR hole's anchor back as a
+   column so the badge gets its own line above the stack. :has ties the rule to
+   our compact state; !important beats the anchor's inline display. Stable hooks
+   only (slot key + our own class) — no hashed sidebar selectors. */
+[data-slot="sidebar.footer.action"]:has(.qa-strip[data-compact="true"]){display:flex !important;flex-direction:column;align-items:center;row-gap:6px}
 .qa-pop-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1);font-size:12px;color:var(--dsw-alias-label-primary)}
 .qa-pop-title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}
-.qa-status{font-size:11px;color:var(--dsw-alias-label-secondary);margin-left:auto;white-space:nowrap}
-.qa-iconbtn{height:22px;min-width:22px;padding:0 6px;border-radius:5px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;font-size:11px;line-height:1;font-family:inherit}
+.qa-status{font-size:11px;color:var(--dsw-alias-label-secondary);margin-left:auto;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.qa-iconbtn{height:22px;min-width:22px;padding:0 6px;border-radius:5px;border:1px solid var(--dsw-alias-border-l2);background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;font-size:11px;line-height:1;font-family:inherit;flex:none}
 .qa-iconbtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .qa-out{margin:0;padding:10px;min-height:64px;max-height:260px;overflow:auto;background:var(--dsw-alias-bg-layer-1);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-word}
 .qa-pop-foot{display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--dsw-alias-border-l1)}
@@ -537,7 +560,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       text || marker ? marker + text : t('run.empty'));
   }
 
-  function Popover({ sessionId, skey, buttonId, t }) {
+  function Popover({ sessionId, skey, buttonId, variant, t }) {
     useStore();
     const context = store.contexts.get(skey);
     const button = ((context && context.buttons) || []).find((entry) => entry.id === buttonId);
@@ -603,7 +626,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     );
   }
 
-  function ButtonCell({ button, sessionId, skey, compact, t }) {
+  function ButtonCell({ button, sessionId, skey, compact, variant, t }) {
     useStore();
     const detail = store.runs.get(runKey(skey, button.id));
     // The 3-second buttons refresh carries the authoritative status; the cached
@@ -612,11 +635,14 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       runId: detail.runId, status: detail.status, startedAt: detail.startedAt, endedAt: detail.endedAt,
     });
     const dotState = runDotState(summary, store.reads.get(runKey(skey, button.id)));
-    const open = !!store.popover && store.popover.skey === skey && store.popover.buttonId === button.id;
+    // The popover belongs to one strip: both strips share skeys on the main
+    // session, so the variant must match too.
+    const open = !!store.popover && store.popover.skey === skey
+      && store.popover.buttonId === button.id && store.popover.variant === variant;
 
     const togglePopover = () => {
       if (open) { store.popover = null; notify(); return; }
-      store.popover = { skey, sessionId, buttonId: button.id };
+      store.popover = { skey, sessionId, buttonId: button.id, variant };
       notify();
       pollRun(sessionId, button.id);
     };
@@ -624,18 +650,23 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     // In the collapsed rail there is no room for the popover, so a click runs
     // and jumps straight to the overlay modal, which carries its own Run/Stop.
     const onCellClick = () => {
-      startRun(sessionId, button.id);
+      startRun(sessionId, button.id, variant);
       if (compact) expandOutput({ skey, sessionId, buttonId: button.id });
     };
 
-    return h('span', { className: 'qa-cell', style: { display: 'inline-flex', alignItems: 'center' } },
+    // Compact chips are icon-only; a button without an icon would collapse to
+    // an empty pill (it may not even have a dot before its first run), so fall
+    // back to the first character of its label.
+    const glyph = button.icon || (compact ? ((button.label || '').trim().charAt(0) || '') : '');
+
+    return h('span', { className: 'qa-cell', 'data-scope': button.scope, style: { display: 'inline-flex', alignItems: 'center' } },
       h('button', {
         className: 'qa-btn',
         title: `${button.label} — ${button.command}`,
         onClick: onCellClick,
       },
         dotState ? h('i', { className: 'qa-dot', 'data-state': dotState }) : null,
-        button.icon ? h('span', null, button.icon) : null,
+        glyph ? h('span', { className: 'qa-glyph' }, glyph) : null,
         compact ? null : h('span', { className: 'qa-label' }, button.label)
       ),
       compact ? null : h('button', {
@@ -672,8 +703,25 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     }, [skey]);
 
     const context = store.contexts.get(skey);
-    const buttons = (context && context.buttons) || [];
-    const popover = store.popover && store.popover.skey === skey ? store.popover : null;
+    const allButtons = (context && context.buttons) || [];
+    // Decisions:
+    // - The sidebar is the GLOBAL surface (its badge reads as one global
+    //   instance), so it shows only global buttons; workspace- and
+    //   session-scoped buttons are instance-level and belong to the top row.
+    // - The header hides global buttons: the sidebar already shows them, so
+    //   the top row spends its space on session/workspace buttons only.
+    const buttons = variant === 'sidebar'
+      ? allButtons.filter((button) => button.scope === 'global')
+      : variant === 'header'
+        ? allButtons.filter((button) => button.scope !== 'global')
+        : allButtons;
+    // The popover renders only in the strip that opened it: header and sidebar
+    // share skeys on the main session, so without the variant check a header
+    // click would pop the sidebar card too (for a button the sidebar does not
+    // even show).
+    const popover = store.popover && store.popover.skey === skey && store.popover.variant === variant
+      ? store.popover
+      : null;
 
     return h('div', { className: 'qa-strip', 'data-variant': variant, 'data-compact': compact ? 'true' : 'false', 'data-qa-strip': '' },
       h('style', null, CSS),
@@ -686,12 +734,14 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
         sessionId: sid,
         skey,
         compact,
+        variant,
         t,
       })),
       popover && !compact ? h(Popover, {
         sessionId: popover.sessionId,
         skey: popover.skey,
         buttonId: popover.buttonId,
+        variant: popover.variant,
         t,
       }) : null,
       h('button', {
@@ -750,7 +800,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
           h('button', {
             className: 'qa-act',
             'data-kind': 'primary',
-            onClick: () => startRun(sessionId, buttonId),
+            onClick: () => startRun(sessionId, buttonId, variant),
           }, run ? t('pop.rerun') : t('pop.run')),
           running
             ? h('button', { className: 'qa-act', 'data-kind': 'danger', onClick: () => killRun(sessionId, buttonId) }, t('pop.kill'))

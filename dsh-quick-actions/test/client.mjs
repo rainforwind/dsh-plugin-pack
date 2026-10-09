@@ -208,6 +208,7 @@ buttonsResponse = {
   buttons: [
     { id: 'clean', label: 'Clean', icon: '🧹', command: 'rm -rf dist', workdir: '', scope: 'workspace', target: '', source: 'store', instanceKey: 'w:clean:ws-a', run: { runId: 'run-1', status: 'completed', startedAt: 1, endedAt: 2 } },
     { id: 'serve', label: 'Serve', command: 'npm run dev', workdir: '', scope: 'session', target: '', source: 'store', instanceKey: 's:serve:ses-1', run: runningSummary },
+    { id: 'status', label: 'Status', command: 'git -C {workspace} status', workdir: '', scope: 'global', target: '', source: 'store', instanceKey: 'g:status', run: null },
   ],
 }
 runPostResponse = {
@@ -308,6 +309,48 @@ await test('footer action buttons never wrap their label', async () => {
     'the .qa-act rule must keep action labels on one line in a squeezed footer');
   assert.match(css, /\.qa-cmd\{[^}]*min-width:0[;,]/,
     'the .qa-cmd rule must have a 0 min-width floor so it shrinks before the button overflows the card');
+});
+
+// The head row is the footer's mirror image: its last item is the close button.
+// The status span is nowrap without overflow, so its automatic min-width is the
+// whole text — in a card sized to the chip row, that floor pushes ✕ past the
+// card edge where overflow:hidden cuts it. The status must yield (ellipsis) and
+// the icon buttons must stay pinned; the expanded sidebar strip additionally
+// grows into the footer's full width so the head normally has room.
+await test('the popover head never squeezes its close button', async () => {
+  const styles = findAll(header, (node) => node.type === 'style');
+  const css = styles.map((node) => node.children.join('')).join('');
+  assert.match(css, /\.qa-status\{[^}]*min-width:0;overflow:hidden;text-overflow:ellipsis/,
+    'the status must yield with an ellipsis instead of pushing the close button out');
+  assert.match(css, /\.qa-iconbtn\{[^}]*flex:none/,
+    'the head icon buttons must be pinned so they never shrink or distort');
+  assert.match(css, /\.qa-strip\[data-variant="sidebar"\]:not\(\[data-compact="true"\]\)\{flex:1 1 auto;min-width:0\}/,
+    'the expanded sidebar strip must grow into the footer width for head room');
+});
+
+// Three scope types get three light hue tints (toolbar fill mixed with the
+// scope's state token), and the chevron joins its button — tinted, borderless
+// on the left, matching end radius — so the two read as one split pill.
+await test('each scope gets its own light tint and the chevron joins the pill', async () => {
+  const styles = findAll(header, (node) => node.type === 'style');
+  const css = styles.map((node) => node.children.join('')).join('');
+  assert.match(css, /\.qa-cell\[data-scope="global"\]\{--qa-tint:color-mix\(in srgb, var\(--dsw-alias-state-business-primary\) 20%, var\(--dsw-alias-bg-layer-2\)\)/,
+    'global chips must tint with the business hue over the LIGHT base');
+  assert.match(css, /\.qa-cell\[data-scope="workspace"\]\{--qa-tint:color-mix\(in srgb, var\(--dsw-alias-state-success-primary\) 20%, var\(--dsw-alias-bg-layer-2\)\)/,
+    'workspace chips must tint with the success hue over the LIGHT base');
+  assert.match(css, /\.qa-cell\[data-scope="session"\]\{--qa-tint:color-mix\(in srgb, var\(--dsw-alias-state-warn-primary\) 20%, var\(--dsw-alias-bg-layer-2\)\)/,
+    'session chips must tint with the warn hue over the LIGHT base');
+  assert.match(css, /\.qa-btn\{[^}]*background:var\(--qa-tint, var\(--dsw-alias-button-tool-bar-fill\)\)/,
+    'the chip must consume the scope tint with a neutral fallback');
+  assert.match(css, /\.qa-btn\{[^}]*border-radius:6px 0 0 6px/,
+    'the main button must square off against the chevron');
+  assert.match(css, /\.qa-chev\{[^}]*border-radius:0 6px 6px 0;border:[^;]*;border-left:none;background:var\(--qa-tint, transparent\)/,
+    'the chevron must join its button: tinted, no left border, matching end radius');
+  assert.match(css, /\.qa-strip\[data-compact="true"\] \.qa-btn\{[^}]*border-radius:6px\}/,
+    'rail chips have no chevron and keep the full radius');
+  const cells = findAll(header, (node) => node.props
+    && node.props.className === 'qa-cell' && node.props['data-scope'] === 'workspace');
+  assert.ok(cells.length > 0, 'cells must carry their scope so the tint can apply');
 });
 
 await test('the strip renders every visible button with its status', async () => {
@@ -450,7 +493,9 @@ await test('the sidebar strip follows the session on screen', async () => {
   const sidebarFetches = fetchCalls.filter((c) => c.url.includes('/quick-actions/buttons'));
   const last = sidebarFetches[sidebarFetches.length - 1];
   assert.match(last.url, /sessionId=ses-1$/, `sidebar asked for the wrong session: ${last.url}`);
-  assert.ok(buttonByText(sidebar, 'Clean'), 'sidebar strip lost the buttons');
+  // The sidebar shows only global buttons by decision; the global "Status"
+  // proves the strip still renders its buttons.
+  assert.ok(buttonByText(sidebar, 'Status'), 'sidebar strip lost the buttons');
 
   // The session on screen changes → the next tick asks about the new one,
   // once the strip re-renders and resolves its session again.
@@ -530,8 +575,19 @@ await test('the collapsed rail renders icon-only chips that open the overlay', a
   const railCss = findAll(rail, (n) => n.type === 'style').map((n) => n.children.join('')).join('');
   assert.match(railCss, /\.qa-strip\[data-compact="true"\]\{[^}]*flex-direction:column/,
     'the rail strip must stack as a narrow centered column to fit the icon rail');
+  // The hole anchor (display:contents) drops task-badge's global badge beside
+  // our pills; in the rail it must become OUR column so the badge gets its own
+  // line above the stack — keyed on stable attributes, never hashed classes.
+  assert.match(railCss, /\[data-slot="sidebar\.footer\.action"\]:has\(\.qa-strip\[data-compact="true"\]\)\{display:flex !important;flex-direction:column/,
+    'the hole anchor must become a column so the badge does not share our row');
   assert.equal(findAll(rail, (n) => n.props && n.props.className === 'qa-label').length, 0,
     'rail chips must hide their label');
+  // Iconless buttons would collapse to empty pills in the rail; the compact
+  // chip falls back to the first character of the label (fixture: the global
+  // "Status", the only scope the sidebar shows).
+  const glyphs = findAll(rail, (n) => n.props && n.props.className === 'qa-glyph');
+  assert.equal(glyphs.length, 1, 'every visible rail chip needs a glyph');
+  assert.equal(glyphs[0].children[0], 'S', 'the glyph must be the label first character');
   assert.equal(findAll(rail, (n) => n.props && n.props.className === 'qa-chev').length, 0,
     'rail strips must hide the popover chevron');
   assert.equal(findAll(rail, (n) => n.props && n.props.className === 'qa-pop').length, 0,
@@ -547,6 +603,47 @@ await test('the collapsed rail renders icon-only chips that open the overlay', a
   const wide = renderNode({ type: sidebar.slot.component, props: { wide: true }, children: [] }, 'wide-after-rail');
   assert.equal(findAll(wide, (n) => n.props && n.props.className === 'qa-pop').length, 0,
     'no popover may be left open by a rail click');
+});
+
+// Decision (user): the sidebar badge reads as ONE global instance, so the
+// sidebar shows only global buttons; workspace- and session-scoped buttons
+// are instance-level and live in the top row (which hides global instead).
+await test('the sidebar shows only global buttons while the header keeps the rest', async () => {
+  const sidebar = renderSlot('sidebar.footer.action');
+  const header = renderSlot('conversation.session.header.actions');
+  const labels = (tree) => findAll(tree, (n) => n.props && n.props.className === 'qa-label')
+    .map((n) => n.children[0]);
+  const sidebarLabels = labels(sidebar);
+  assert.ok(sidebarLabels.includes('Status'), 'the sidebar must show the global button');
+  assert.ok(!sidebarLabels.includes('Clean'), 'workspace buttons stay out of the sidebar');
+  assert.ok(!sidebarLabels.includes('Serve'),
+    'session buttons stay out of the sidebar (an even narrower scope than workspace)');
+  const headerLabels = labels(header);
+  assert.ok(headerLabels.includes('Clean') && headerLabels.includes('Serve'),
+    'the header keeps the instance-level buttons');
+  assert.ok(!headerLabels.includes('Status'), 'the header hides the global button');
+});
+
+// Mirror of the sidebar's any-workspace decision: the sidebar strip always
+// shows global buttons, so the header drops them to save the top row's space.
+await test('the header drops global buttons that the sidebar already shows', async () => {
+  const original = buttonsResponse;
+  buttonsResponse = { buttons: [...original.buttons, { id: 'g-clock', label: 'Clock', icon: '', scope: 'global', target: '', command: 'date' }] };
+  for (const entry of intervals) entry.fn();
+  await flush();
+  const headerAfter = renderSlot('conversation.session.header.actions');
+  const sidebarAfter = renderSlot('sidebar.footer.action');
+  const labels = (tree) => findAll(tree, (n) => n.props && n.props.className === 'qa-label')
+    .map((n) => n.children[0]);
+  assert.ok(!labels(headerAfter).includes('Clock'),
+    'the header must hide the global button the sidebar already shows');
+  assert.ok(buttonByText(sidebarAfter, 'Clock'),
+    'the sidebar must keep showing the global button');
+  buttonsResponse = original;
+  for (const entry of intervals) entry.fn();
+  await flush();
+  renderSlot('conversation.session.header.actions');
+  renderSlot('sidebar.footer.action');
 });
 
 // The chip's green dot means "a finished result you have not looked at".
@@ -575,6 +672,19 @@ await test('reading a finished result clears the green dot', async () => {
     'displaying the result must clear the green dot');
   assert.ok(dots(tree).some((n) => n.props['data-state'] === 'running'),
     'a read receipt must not clear a different button\'s running dot');
+});
+
+// Both strips share skeys on the main session, so the popover state carries
+// the opening strip's variant: the header popover left open above must not pop
+// a card in the sidebar, which shows a different scope set and may not even
+// display that button.
+await test('an open popover stays in the strip that opened it', async () => {
+  const headerNow = renderSlot('conversation.session.header.actions');
+  assert.ok(findAll(headerNow, (n) => n.props && n.props.className === 'qa-pop').length > 0,
+    'the popover must render in the strip that opened it');
+  const sidebar = renderSlot('sidebar.footer.action');
+  assert.equal(findAll(sidebar, (n) => n.props && n.props.className === 'qa-pop').length, 0,
+    'the sidebar must not pop a card for a button it does not show');
 });
 
 console.log(`\n${String(passed)} passed, ${String(failures.length)} failed`)
