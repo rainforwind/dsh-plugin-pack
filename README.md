@@ -7,6 +7,7 @@ DSH 插件集合。每个插件在独立子目录中，可独立安装使用。
 | 插件 | 说明 |
 |------|------|
 | [dsh-task-badge](./dsh-task-badge/) | Favicon + 侧边栏：运行中/未读任务计数 |
+| [dsh-quick-actions](./dsh-quick-actions/) | 快捷操作按钮：执行 shell 命令并实时看输出，可按会话/workspace/全局定义 scope |
 
 ## 安装单个插件
 

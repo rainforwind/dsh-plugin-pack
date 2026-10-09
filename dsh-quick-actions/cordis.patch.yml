@@ -1,0 +1,24 @@
+# dsh bundle patch: inserts quick-actions into the profile's host layer stack.
+# `config` is optional; recognized keys (a patch entry replaces the whole
+# config, so restate every key you care about):
+#
+#   storePath:    where the button JSON store lives (default: $DSH_PROFILE_DIR/
+#                 dsh-quick-actions.json, else ~/.dsh/dsh-quick-actions.json)
+#   workdir:      default working directory for commands that set none
+#   buttons:      static button definitions, read-only in the UI panel
+#   maxOutputChars: per-run output cap kept in memory (default 200000)
+#   pollMs:       output pump interval (default 150)
+#
+# - insert:
+#     - id: dsh-quick-actions
+#       name: 'dsh-quick-actions'
+#       config:
+#         workdir: /Users/you/projects
+#         buttons:
+#           - id: status
+#             label: Git status
+#             command: git -C {workspace} status -sb
+#             scope: workspace
+- insert:
+    - id: dsh-quick-actions
+      name: 'dsh-quick-actions'
