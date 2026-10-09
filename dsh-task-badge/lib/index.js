@@ -167,7 +167,11 @@ function apply(ctx) {
       })
     }
 
-    webServer.register({
+    // Route registration MUST be effect-wrapped: webServer.register returns a
+    // disposer, and only ctx.effect ties it to this plugin's lifecycle. Without
+    // it, disable leaves zombie routes that keep serving the old instance's
+    // frozen counters, and re-enable throws on duplicate (kind, path).
+    ctx.effect(() => webServer.register({
       kind: 'exact',
       path: '/task-badge/counts',
       handler: (request, response) => {
@@ -175,9 +179,32 @@ function apply(ctx) {
         if (request.method !== 'GET') { response.writeHead(405); response.end(); return }
         sendJson(response, 200, getCounts())
       }
-    })
+    }), 'route /task-badge/counts')
 
-    webServer.register({
+    // Read-only diagnosis: the raw sets behind `running`, so a badge number
+    // can be traced to the exact sessions and jobs producing it.
+    ctx.effect(() => webServer.register({
+      kind: 'exact',
+      path: '/task-badge/state',
+      handler: (request, response) => {
+        if (request.method === 'OPTIONS') { sendJson(response, 204, {}); return }
+        if (request.method !== 'GET') { response.writeHead(405); response.end(); return }
+        const runningJobIds = []
+        jobMap.forEach((job, id) => {
+          if (job.status === 'running' || job.status === 'stopping') runningJobIds.push({ id: id, owner: job.owner, status: job.status })
+        })
+        sendJson(response, 200, {
+          activeSessions: Array.from(activeSessions),
+          runningSessions: Array.from(activeSessions).filter((id) => !subagentSessions.has(id)),
+          subagentSessions: Array.from(subagentSessions),
+          unreadSessions: Array.from(unreadSessions),
+          runningJobs: runningJobIds,
+          viewedSessionId,
+        })
+      }
+    }), 'route /task-badge/state')
+
+    ctx.effect(() => webServer.register({
       kind: 'exact',
       path: '/task-badge/mark-viewed',
       handler: async (request, response) => {
@@ -189,7 +216,7 @@ function apply(ctx) {
         markViewed(body && body.sessionId)
         sendJson(response, 200, { ok: true })
       }
-    })
+    }), 'route /task-badge/mark-viewed')
 
     console.log('[task-badge] HTTP routes registered')
   })

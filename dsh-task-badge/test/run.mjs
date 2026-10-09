@@ -25,8 +25,18 @@ async function test(label, fn) {
 function makeHost({ jobs } = {}) {
   const listeners = new Map()
   const routes = new Map()
-  const webServer = { register: (route) => { routes.set(route.path, route) } }
+  // Mirror the real webServer contract: register returns a disposer, and
+  // registering the same (kind, path) twice throws (dsh-host-webserver).
+  const webServer = {
+    register: (route) => {
+      const key = `${route.kind}:${route.path}`
+      if (routes.has(key)) throw new Error(`duplicate route ${key}`)
+      routes.set(key, route)
+      return () => routes.delete(key)
+    },
+  }
 
+  const effects = []
   const ctx = {
     get(name) {
       if (name === 'jobs') return jobs
@@ -38,6 +48,14 @@ function makeHost({ jobs } = {}) {
       listeners.get(name).push({ fn, options })
     },
     inject(names, cb) { cb(ctx) },
+    effect(fn) {
+      const dispose = fn()
+      const entry = { dispose }
+      effects.push(entry)
+      return () => {
+        if (entry.dispose) { entry.dispose(); entry.dispose = null }
+      }
+    },
     emit(name, ...args) {
       for (const l of listeners.get(name) || []) l.fn(...args)
     },
@@ -47,11 +65,13 @@ function makeHost({ jobs } = {}) {
   const quiet = console.log
   console.log = () => {}
   try { apply(ctx) } finally { console.log = quiet }
-  return { ctx, routes }
+  // Runs every effect disposer, i.e. what cordis does when the plugin is disabled.
+  const dispose = () => { for (const e of effects.splice(0)) e.dispose?.() }
+  return { ctx, routes, dispose }
 }
 
 async function counts(routes) {
-  const route = routes.get('/task-badge/counts')
+  const route = routes.get('exact:/task-badge/counts')
   const out = {}
   await new Promise((resolve) => route.handler({ method: 'GET' }, {
     writeHead(status) { out.status = status },
@@ -61,7 +81,7 @@ async function counts(routes) {
 }
 
 async function markViewed(routes, sessionId) {
-  const route = routes.get('/task-badge/mark-viewed')
+  const route = routes.get('exact:/task-badge/mark-viewed')
   const chunks = [JSON.stringify({ sessionId })]
   let status
   await new Promise((resolve) => route.handler({
@@ -278,6 +298,52 @@ await test('jobs owned by a subagent are not the user\'s counts', async () => {
   ctx.emit('subagent/start', { id: 'child-9' })
   jobs.fire({ type: 'registered', job: { id: 'bash-5', status: 'running', owner: 'child-9', startedAt: 1 } })
   assert.equal((await counts(routes)).running, 0)
+})
+
+// ── state (diagnosis) route ────────────────────────────────────────────────
+
+await test('state route names the sessions and jobs behind `running`', async () => {
+  const jobs = makeJobs()
+  const { ctx, routes } = makeHost({ jobs })
+  ctx.emit('api-session/status', 'ses-A', true)
+  ctx.emit('api-session/status', 'ses-B', true)
+  ctx.emit('subagent/start', { id: 'child-1' })
+  ctx.emit('api-session/status', 'child-1', true) // learned late, still purged
+  jobs.fire({ type: 'registered', job: { id: 'bash-9', status: 'running', owner: 'ses-B', startedAt: 1 } })
+
+  const route = routes.get('exact:/task-badge/state')
+  const out = {}
+  await new Promise((resolve) => route.handler({ method: 'GET' }, {
+    writeHead(status) { out.status = status },
+    end(body) { out.body = JSON.parse(body); resolve() },
+  }))
+
+  assert.equal(out.status, 200)
+  assert.deepEqual(out.body.runningSessions.sort(), ['ses-A', 'ses-B'], 'subagent child excluded from the named list')
+  assert.deepEqual(out.body.subagentSessions, ['child-1'])
+  assert.deepEqual(out.body.runningJobs, [{ id: 'bash-9', owner: 'ses-B', status: 'running' }])
+  assert.equal(
+    out.body.runningSessions.length + out.body.runningJobs.length,
+    (await counts(routes)).running,
+    'named parts must add up to the badge number'
+  )
+})
+
+// ── lifecycle: routes must not outlive the plugin ──────────────────────────
+
+await test('disable unregisters every route, so re-enable cannot hit duplicates', () => {
+  const quiet = console.log
+  const host = makeHost({ jobs: makeJobs() })
+  assert.equal(host.routes.size, 3, 'counts, state, mark-viewed registered')
+  host.dispose()
+  assert.equal(host.routes.size, 0, 'all routes released on disable')
+  // Re-enable = apply again on the same webServer. The stub throws on
+  // duplicate (kind, path), mirroring dsh-host-webserver: without effect-
+  // wrapped registration this second apply would blow up.
+  console.log = () => {}
+  try { apply(host.ctx) } finally { console.log = quiet }
+  assert.equal(host.routes.size, 3, 're-apply after dispose registers cleanly')
+  host.dispose()
 })
 
 // ── degraded host ──────────────────────────────────────────────────────────
