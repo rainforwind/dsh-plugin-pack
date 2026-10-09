@@ -59,6 +59,7 @@ JSON store 默认路径：`$DSH_PROFILE_DIR/dsh-quick-actions.json`，未设置�
 - **workspace**：`ctx.get('workspaceRegistry').list()` 返回实体，用 `entity.sessionIds` 反查会话所属 workspace，取 `entity.id` / `entity.path`。服务缺席时会话视为未分组（workspace 相关 target 不命中，无 target 的照常可见）。
 - **shell**：`ctx.shell.resolve(request)` → `ctx.shell.execute(spec)`，读输出走 `exec.observed[channel].readFrom(offset)`（`{ text, nextOffset, lossy }`），`exec.done` 只 resolve 不 reject。
 - **客户端服务**：`slots` / `sessions` / `workspaces`（配置面板的 workspace 下拉：`workspaces.list.getSnapshot().items`）/ `locale`（`ctx.locale.register(NS, { zh, en })`，缺席时回退到按 `navigator.language` 选的内置词典）。全部可选，缺席即降级。
+- **timer（硬依赖）**：客户端半区跑在受限 context 上，`ctx.interval` 只对声明了 `inject: ['slots', 'timer']` 的 fiber 放行——未声明就调用是同步抛错，会让整个页面启动失败（`web boot: N entries did not activate / dsh-quick-actions: failed`）。3s 上下文轮询与 popover 的 700ms 轮询都走 `ctx.interval`，所以 `timer` 必须留在 inject 里，不能当可选项。
 
 ## 安装
 

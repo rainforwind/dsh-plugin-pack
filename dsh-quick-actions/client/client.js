@@ -22,7 +22,10 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 
   const NS = 'quick-actions';
   const name = 'dsh-quick-actions-client';
-  const inject = ['slots'];
+  // `timer` is a hard dependency: the restricted client context only lets the
+  // timer helpers through when the fiber declares them, and apply() reads
+  // ctx.interval for the 3s poll (and every popover poll reuses it).
+  const inject = ['slots', 'timer'];
 
   // ── locale ───────────────────────────────────────────────────────────────
 
@@ -207,6 +210,7 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     contexts: new Map(),   // context key -> { sessionId, workspaceId, buttons, error? }
     active: new Map(),     // context key -> { sessionId, count } (mounted strips)
     runs: new Map(),       // `key::buttonId` -> run view with text
+    reads: new Map(),      // `key::buttonId` -> run token whose result was displayed
     popover: null,         // { skey, sessionId, buttonId }
     overlay: null,         // { kind: 'config' } | { kind: 'output', skey, sessionId, buttonId }
     config: null,          // { buttons, configButtons, storePath }
@@ -428,8 +432,30 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     return t('status.failed');
   }
 
-  function runDotState(run) {
+  // Identity of one finished run for read-receipt tracking: two polls describe
+  // the same result only when their tokens match.
+  function runToken(run) {
+    if (!run) return '';
+    return String(run.runId || run.startedAt || run.endedAt || '');
+  }
+
+  // A terminal result becomes "read" the first time the popover or the output
+  // modal displays it; the chip's status dot then disappears until a new run
+  // (new token) finishes unread.
+  function markRead(skey, buttonId, run) {
+    if (!run || run.status === 'running') return;
+    const token = runToken(run);
+    if (!token) return;
+    const key = runKey(skey, buttonId);
+    if (store.reads.get(key) === token) return;
+    store.reads.set(key, token);
+    notify();
+  }
+
+  function runDotState(run, readToken) {
     if (!run) return null;
+    if (run.status === 'running') return 'running';
+    if (readToken && readToken === runToken(run)) return null;
     return run.status || null;
   }
 
@@ -449,8 +475,11 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 .qa-add{min-width:24px;height:26px;padding:0 4px;border-radius:6px;border:1px dashed var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);font-size:14px;cursor:pointer;line-height:1;font-family:inherit}
 .qa-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .qa-empty{font-size:11px;color:var(--dsw-alias-label-tertiary);padding:0 4px}
-.qa-pop{position:absolute;top:calc(100% + 6px);right:0;z-index:60;width:440px;max-width:78vw;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,.32);display:flex;flex-direction:column;overflow:hidden;text-align:left}
-.qa-strip[data-variant="sidebar"] .qa-pop{top:auto;bottom:calc(100% + 6px)}
+.qa-pop{position:absolute;top:calc(100% + 6px);right:0;z-index:60;width:min(440px,100%);max-width:78vw;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,.32);display:flex;flex-direction:column;overflow:hidden;text-align:left}
+.qa-strip[data-variant="sidebar"] .qa-pop{top:auto;bottom:calc(100% + 6px);left:0;right:auto}
+.qa-strip[data-compact="true"]{flex-direction:column;align-items:center;justify-content:center;row-gap:6px}
+.qa-strip[data-compact="true"] .qa-btn{padding:0 6px;max-width:none}
+.qa-strip[data-compact="true"] .qa-empty{display:none}
 .qa-pop-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--dsw-alias-border-l1);font-size:12px;color:var(--dsw-alias-label-primary)}
 .qa-pop-title{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:190px}
 .qa-status{font-size:11px;color:var(--dsw-alias-label-secondary);margin-left:auto;white-space:nowrap}
@@ -458,8 +487,8 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 .qa-iconbtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .qa-out{margin:0;padding:10px;min-height:64px;max-height:260px;overflow:auto;background:var(--dsw-alias-bg-layer-1);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-word}
 .qa-pop-foot{display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--dsw-alias-border-l1)}
-.qa-cmd{flex:1;min-width:60px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:var(--dsw-alias-label-dimmed);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.qa-act{height:24px;padding:0 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-tool-bar-fill);color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;font-family:inherit}
+.qa-cmd{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:var(--dsw-alias-label-dimmed);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qa-act{height:24px;padding:0 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-tool-bar-fill);color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap}
 .qa-act:hover{background:var(--dsw-alias-button-tool-bar-hover)}
 .qa-act[data-kind="primary"]{background:var(--dsw-alias-button-primary-fill);border-color:transparent;color:var(--dsw-alias-label-primary-inverted)}
 .qa-act[data-kind="primary"]:hover{background:var(--dsw-alias-button-primary-hover)}
@@ -521,6 +550,13 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       return dispose;
     }, [skey, buttonId]);
 
+    // Displaying a finished result counts as reading it: the chip's status dot
+    // clears as soon as the popover shows this run (open-after-completion or
+    // completion-while-viewing — the deps change either way).
+    React.useEffect(() => {
+      markRead(skey, buttonId, run);
+    }, [runToken(run), run && run.status]);
+
     // Clicking outside the strip dismisses the popover.
     React.useEffect(() => {
       if (typeof document === 'undefined' || !document.addEventListener) return undefined;
@@ -567,7 +603,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     );
   }
 
-  function ButtonCell({ button, sessionId, skey, t }) {
+  function ButtonCell({ button, sessionId, skey, compact, t }) {
     useStore();
     const detail = store.runs.get(runKey(skey, button.id));
     // The 3-second buttons refresh carries the authoritative status; the cached
@@ -575,7 +611,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     const summary = button.run || (detail && {
       runId: detail.runId, status: detail.status, startedAt: detail.startedAt, endedAt: detail.endedAt,
     });
-    const dotState = runDotState(summary);
+    const dotState = runDotState(summary, store.reads.get(runKey(skey, button.id)));
     const open = !!store.popover && store.popover.skey === skey && store.popover.buttonId === button.id;
 
     const togglePopover = () => {
@@ -585,17 +621,24 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       pollRun(sessionId, button.id);
     };
 
+    // In the collapsed rail there is no room for the popover, so a click runs
+    // and jumps straight to the overlay modal, which carries its own Run/Stop.
+    const onCellClick = () => {
+      startRun(sessionId, button.id);
+      if (compact) expandOutput({ skey, sessionId, buttonId: button.id });
+    };
+
     return h('span', { className: 'qa-cell', style: { display: 'inline-flex', alignItems: 'center' } },
       h('button', {
         className: 'qa-btn',
         title: `${button.label} — ${button.command}`,
-        onClick: () => startRun(sessionId, button.id),
+        onClick: onCellClick,
       },
         dotState ? h('i', { className: 'qa-dot', 'data-state': dotState }) : null,
         button.icon ? h('span', null, button.icon) : null,
-        h('span', { className: 'qa-label' }, button.label)
+        compact ? null : h('span', { className: 'qa-label' }, button.label)
       ),
-      h('button', {
+      compact ? null : h('button', {
         className: 'qa-chev',
         title: t('pop.toggle'),
         'aria-label': t('pop.toggle'),
@@ -605,11 +648,15 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     );
   }
 
-  function Strip({ sessionId, variant, t: tProp }) {
+  function Strip({ sessionId, variant, wide, t: tProp }) {
     useStore();
     const t = tProp || localT;
     const sid = variant === 'sidebar' ? mainSessionId() : sessionId;
     const skey = ctxKey(sid);
+    // The sidebar hands its slots `wide: false` while collapsed: the footer
+    // shrinks to the icon rail, so the strip goes icon-only and routes output
+    // to the overlay instead of the (unrenderable) popover.
+    const compact = variant === 'sidebar' && wide === false;
 
     React.useEffect(() => {
       const existing = store.active.get(skey);
@@ -628,7 +675,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     const buttons = (context && context.buttons) || [];
     const popover = store.popover && store.popover.skey === skey ? store.popover : null;
 
-    return h('div', { className: 'qa-strip', 'data-variant': variant, 'data-qa-strip': '' },
+    return h('div', { className: 'qa-strip', 'data-variant': variant, 'data-compact': compact ? 'true' : 'false', 'data-qa-strip': '' },
       h('style', null, CSS),
       buttons.length === 0
         ? h('span', { className: 'qa-empty' }, context && context.error ? context.error : t('strip.empty'))
@@ -638,9 +685,10 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
         button,
         sessionId: sid,
         skey,
+        compact,
         t,
       })),
-      popover ? h(Popover, {
+      popover && !compact ? h(Popover, {
         sessionId: popover.sessionId,
         skey: popover.skey,
         buttonId: popover.buttonId,
@@ -667,6 +715,12 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       const dispose = intervalFn(() => { pollRun(sessionId, buttonId); }, 700);
       return dispose;
     }, [skey, buttonId]);
+
+    // The overlay is the other place a finished result is displayed — reading
+    // it here clears the chip's status dot just like the popover does.
+    React.useEffect(() => {
+      markRead(skey, buttonId, run);
+    }, [runToken(run), run && run.status]);
 
     const running = !!run && run.status === 'running';
     const label = button ? button.label : buttonId;

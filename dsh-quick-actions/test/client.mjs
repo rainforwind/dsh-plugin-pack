@@ -274,6 +274,42 @@ await test('the header strip fetches buttons for its own session', async () => {
   assert.match(fetchCalls[0].url, /\/quick-actions\/buttons\?sessionId=ses-1$/);
 });
 
+// The sidebar strip sits at the screen's left edge; a right-anchored 440px card
+// slides under the app rail and gets clipped. The sidebar variant must anchor
+// its popover left so the card grows into the chat area instead.
+await test('the sidebar popover anchors left so it stays on screen', async () => {
+  const styles = findAll(header, (node) => node.type === 'style');
+  assert.ok(styles.length > 0, 'no style node was rendered');
+  const css = styles.map((node) => node.children.join('')).join('');
+  assert.match(css, /\.qa-strip\[data-variant="sidebar"\] \.qa-pop\{[^}]*left:0;right:auto/,
+    'the sidebar popover must anchor left:0;right:auto or it overflows the screen');
+});
+
+// A fixed 440px card overshoots the strip that hosts it: the overshoot gets
+// clipped by the sidebar's overflow (Run button lost) or slides under the
+// sidebar panel (header title cut). Constraining width to the strip's own box
+// keeps the card inside the slot's allocated space in every window size.
+await test('the popover never exceeds the strip that anchors it', async () => {
+  const styles = findAll(header, (node) => node.type === 'style');
+  const css = styles.map((node) => node.children.join('')).join('');
+  assert.match(css, /\.qa-pop\{[^}]*width:min\(440px,100%\)/,
+    'the popover width must be min(440px,100%) so it stays inside the strip box');
+});
+
+// A narrowed footer squeezes the action button; without nowrap the label wraps
+// to a second line inside the fixed 24px height and the card's overflow:hidden
+// cuts it ("Run again" → "Run" + clipped "again"). And with a min-width floor
+// on the command span the floor refuses to shrink, pushing the button past the
+// card edge where the card clips it — the command must yield first.
+await test('footer action buttons never wrap their label', async () => {
+  const styles = findAll(header, (node) => node.type === 'style');
+  const css = styles.map((node) => node.children.join('')).join('');
+  assert.match(css, /\.qa-act\{[^}]*white-space:nowrap/,
+    'the .qa-act rule must keep action labels on one line in a squeezed footer');
+  assert.match(css, /\.qa-cmd\{[^}]*min-width:0[;,]/,
+    'the .qa-cmd rule must have a 0 min-width floor so it shrinks before the button overflows the card');
+});
+
 await test('the strip renders every visible button with its status', async () => {
   const labels = buttonsIn(header).map(textOf);
   assert.ok(labels.some((text) => text.includes('Clean')), `missing clean button in ${JSON.stringify(labels)}`);
@@ -439,6 +475,106 @@ await test('Escape also dismisses an open popover', async () => {
   escape.fn({ key: 'Escape' });
   header = renderSlot('conversation.session.header.actions');
   assert.equal(findAll(header, (node) => node.props && node.props.className === 'qa-pop').length, 0);
+});
+
+// The restricted client context only exposes ctx.interval to a fiber that
+// declares `timer` in its inject list; calling it without the declaration is a
+// synchronous throw that kills the whole boot (web boot: N entries did not
+// activate / dsh-quick-actions: failed). The plain stub above always answers
+// ctx.interval, so it stays blind to that guard — this one enforces it.
+await test('apply licenses ctx.interval through the declared timer inject', async () => {
+  assert.ok(Array.isArray(plugin.inject) && plugin.inject.includes('slots'),
+    'client inject must declare slots');
+  assert.ok(plugin.inject.includes('timer'),
+    'client inject must declare "timer": the restricted ctx denies ctx.interval without it');
+
+  const guardIntervals = [];
+  const guardedCtx = new Proxy(ctx, {
+    get(target, prop, receiver) {
+      if (prop === 'interval') {
+        return (fn, ms) => {
+          if (!plugin.inject.includes('timer')) {
+            throw new Error('service "timer" is not declared by your plugin. Declare it on the plugin you return: { inject: [\'timer\', …] }');
+          }
+          guardIntervals.push({ fn, ms });
+          return target.interval(fn, ms);
+        };
+      }
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+  plugin.apply(guardedCtx);   // must not throw
+  assert.ok(guardIntervals.length >= 1,
+    'the 3s poll never reached the guarded ctx.interval path');
+});
+
+// The sidebar hands its footer slot `wide: false` while collapsed: the footer
+// shrinks to the icon rail, so labels and the popover chevron disappear, chips
+// stay runnable, and the click opens the output modal (fixed, centered) instead
+// of a popover that could not render in a ~40px column.
+await test('the collapsed rail renders icon-only chips that open the overlay', async () => {
+  sessionSnapshot = {
+    ids: ['ses-1'],
+    byId: {
+      'ses-1': { id: 'ses-1', title: 'Main', retainedBy: { mainView: 1 } },
+    },
+  };
+  const sidebar = registered.find((r) => r.hole === 'sidebar.footer.action');
+  const rail = renderNode({ type: sidebar.slot.component, props: { wide: false }, children: [] }, 'rail');
+  // The rail's footer row is [task-badge] + our strip inside ~92px with
+  // justify-content:center: a row-mode strip (chip+add ≈ 70px) overflows that
+  // box and spills out both edges (badge cut left, chip past the rail's right
+  // edge). Column mode shrinks the strip's cross size to one chip (~40px) so
+  // the row fits and everything stays centered under the rail's icon column.
+  const railCss = findAll(rail, (n) => n.type === 'style').map((n) => n.children.join('')).join('');
+  assert.match(railCss, /\.qa-strip\[data-compact="true"\]\{[^}]*flex-direction:column/,
+    'the rail strip must stack as a narrow centered column to fit the icon rail');
+  assert.equal(findAll(rail, (n) => n.props && n.props.className === 'qa-label').length, 0,
+    'rail chips must hide their label');
+  assert.equal(findAll(rail, (n) => n.props && n.props.className === 'qa-chev').length, 0,
+    'rail strips must hide the popover chevron');
+  assert.equal(findAll(rail, (n) => n.props && n.props.className === 'qa-pop').length, 0,
+    'the popover must not render in the collapsed rail');
+
+  const chip = findAll(rail, (n) => n.props && n.props.className === 'qa-btn')[0];
+  assert.ok(chip, 'no runnable chip rendered in the rail');
+  chip.props.onClick();
+  await flush();
+  const overlay = renderSlot('shell.overlay');
+  assert.ok(findAll(overlay, (n) => n.props && n.props.className === 'qa-modal').length > 0,
+    'a rail click must open the output overlay for live output');
+  const wide = renderNode({ type: sidebar.slot.component, props: { wide: true }, children: [] }, 'wide-after-rail');
+  assert.equal(findAll(wide, (n) => n.props && n.props.className === 'qa-pop').length, 0,
+    'no popover may be left open by a rail click');
+});
+
+// The chip's green dot means "a finished result you have not looked at".
+// Displaying the result — in the popover or the output overlay — is the read
+// receipt; without that receipt the dot would stay green forever after every
+// run, and the receipt must only clear the button it belongs to.
+await test('reading a finished result clears the green dot', async () => {
+  runGetResponse = { ok: true, run: completedRun };
+  const hole = 'conversation.session.header.actions';
+  const dots = (root) => findAll(root, (n) => n.props && n.props.className === 'qa-dot');
+  let tree = renderSlot(hole);
+  assert.ok(dots(tree).some((n) => n.props['data-state'] === 'completed'),
+    'an unread completed run must show its green dot');
+  assert.ok(dots(tree).some((n) => n.props['data-state'] === 'running'),
+    'the running button keeps its own dot');
+
+  const chev = findAll(tree, (n) => n.props && n.props.className === 'qa-chev')[0];
+  assert.ok(chev, 'no popover toggle rendered');
+  chev.props.onClick();                 // open the popover on the completed button
+  await flush();
+  tree = renderSlot(hole);              // popover mounts, its poll lands completed
+  await flush();
+  tree = renderSlot(hole);              // markRead runs inside the popover effect
+  tree = renderSlot(hole);              // next pass renders the cleared dot
+  assert.ok(!dots(tree).some((n) => n.props['data-state'] === 'completed'),
+    'displaying the result must clear the green dot');
+  assert.ok(dots(tree).some((n) => n.props['data-state'] === 'running'),
+    'a read receipt must not clear a different button\'s running dot');
 });
 
 console.log(`\n${String(passed)} passed, ${String(failures.length)} failed`)
