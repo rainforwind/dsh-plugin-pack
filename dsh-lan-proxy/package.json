@@ -1,0 +1,30 @@
+{
+  "name": "dsh-lan-proxy",
+  "version": "1.1.0",
+  "description": "Reverse-proxy the loopback-only DSH Web GUI onto configured LAN/Tailscale client IPs: own bind host/port plus a source-IP allowlist, configured live from the dsh-lan-proxy entry config or its Settings page.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}

@@ -8,6 +8,7 @@ DSH 插件集合。每个插件在独立子目录中，可独立安装使用。
 |------|------|
 | [dsh-task-badge](./dsh-task-badge/) | Favicon + 侧边栏：运行中/未读任务计数 |
 | [dsh-quick-actions](./dsh-quick-actions/) | 快捷操作按钮：执行 shell 命令并实时看输出，可按会话/workspace/全局定义 scope |
+| [dsh-lan-proxy](./dsh-lan-proxy/) | 按 IP 白名单把回环 Web GUI 反代到局域网/Tailscale（独立监听 + 来源校验，Settings 面板直接编辑、保存即重绑；需 dsh >= 0.1.7） |
 
 ## 安装单个插件
 
