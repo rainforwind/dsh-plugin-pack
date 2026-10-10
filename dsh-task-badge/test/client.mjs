@@ -93,9 +93,17 @@ function FakeImage() {
 }
 
 let loaded = null
+const docListeners = new Map()
 globalThis.document = {
   baseURI: 'http://127.0.0.1:3080/',
   head,
+  addEventListener(name, fn) {
+    if (!docListeners.has(name)) docListeners.set(name, new Set())
+    docListeners.get(name).add(fn)
+  },
+  removeEventListener(name, fn) {
+    docListeners.get(name)?.delete(fn)
+  },
   querySelectorAll(sel) { return sel.includes('rel*=') ? [darkLink, lightLink] : [] },
   // `querySelector` yields the FIRST match, which is the trap this plugin
   // fell into: only the dark-scheme link ever got patched.
@@ -156,11 +164,13 @@ const ctx = {
 }
 
 let countsResponse = {}
+let stateResponse = { activeSessions: [], runningSessions: [], subagentSessions: [], unreadSessions: [], runningJobs: [], unviewedJobSessionIds: [], viewedSessionId: null }
 const calls = []
 globalThis.fetch = async (url, opts) => {
   calls.push({ url, method: opts ? opts.method : 'GET', body: opts && opts.body })
   if (url.endsWith('/task-badge/mark-viewed')) return { ok: true, json: async () => ({ ok: true }) }
   if (url.endsWith('/task-badge/counts')) return { ok: true, json: async () => countsResponse }
+  if (url.endsWith('/task-badge/state')) return { ok: true, json: async () => stateResponse }
   throw new Error(`unexpected url ${url}`)
 }
 
@@ -169,9 +179,9 @@ globalThis.fetch = async (url, opts) => {
 snapshot = {
   ids: ['ses-current', 'ses-other', 'child'],
   byId: {
-    'ses-current': { id: 'ses-current', retainedBy: { mainView: 1 } },
-    'ses-other': { id: 'ses-other', retainedBy: {} },
-    'child': { id: 'child', retainedBy: {}, origin: 'subagent' },
+    'ses-current': { id: 'ses-current', displayTitle: 'Current chat', retainedBy: { mainView: 1 } },
+    'ses-other': { id: 'ses-other', displayTitle: 'Other chat', retainedBy: {} },
+    'child': { id: 'child', displayTitle: 'Child worker', retainedBy: {}, origin: 'subagent' },
   },
   phase: 'ready',
 }
@@ -202,6 +212,33 @@ await flush()
 
 const posted = () => calls.filter((c) => c.method === 'POST')
 
+// Walk the stub element tree (children may be nested arrays from sections).
+function findAll(node, pred, out = []) {
+  if (node == null || typeof node !== 'object') return out
+  if (Array.isArray(node)) { for (const n of node) findAll(n, pred, out); return out }
+  if (pred(node)) out.push(node)
+  findAll(node.children, pred, out)
+  return out
+}
+const rowsOf = (el) => findAll(el, (n) => n.props && n.props.className === 'tb-row')
+const rowByKey = (el, key) => rowsOf(el).find((r) => r.props.key === key)
+const renderCard = () => { hookIndex = 0; return element.children[2].type() }
+
+// Load new host state into the open card: flip the fixture, make sure the
+// card is open, and poll once (an open card refetches on every tick).
+async function cardWith(next) {
+  stateResponse = next
+  element = render()
+  if (!element.children[2]) {
+    element.children[1].props.onClick()
+    await flush()
+    element = render()
+  }
+  await runPoll()
+  element = render()
+  return renderCard()
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────
 
 await test('the slot lands on the sidebar footer', async () => {
@@ -221,14 +258,127 @@ await test('mark-viewed is issued before the counts read', async () => {
 
 await test('the badge drops the session on screen and the subagent child', async () => {
   assert.ok(element, 'badge did not render')
-  assert.equal(element.props.title, '1 unread — click to view')
+  // Title lives on the clickable pill inside the wrapper, not the wrapper.
+  const badge = element.children[1]
+  assert.equal(badge.props.className, 'tb-badge')
+  assert.equal(badge.props.title, '1 unread — click for details')
 })
 
-await test('clicking opens a real unread session, never the one on screen', async () => {
-  opened.length = 0
-  await element.props.onClick()
+await test('clicking the badge opens the detail card and asks the host for state', async () => {
+  calls.length = 0
+  element.children[1].props.onClick()
   await flush()
-  assert.deepEqual(opened, ['ses-other'])
+  element = render()
+  await flush()
+
+  assert.ok(calls.some((c) => c.url.endsWith('/task-badge/state')), 'state was never fetched')
+  assert.equal(element.children[2].type.name, 'TaskCard', 'card component not mounted')
+  assert.equal(renderCard().props.className, 'tb-pop', 'card did not render')
+})
+
+await test('a running job names the session that owns it, and its row jumps there', async () => {
+  const card = await cardWith({
+    activeSessions: ['ses-current'],
+    runningSessions: ['ses-current'],
+    subagentSessions: [],
+    unreadSessions: [],
+    runningJobs: [{ id: 'bash-167', owner: 'ses-other', status: 'running' }],
+    unviewedJobSessionIds: [],
+    viewedSessionId: 'ses-current',
+  })
+
+  const jobRow = rowByKey(card, 'j:bash-167')
+  assert.ok(jobRow, 'job row missing')
+  const sub = jobRow.children[2]
+  assert.equal(sub.props.className, 'tb-sub')
+  assert.equal(sub.children[0], 'in Other chat', 'owner session title not shown')
+
+  opened.length = 0
+  jobRow.props.onClick()
+  assert.deepEqual(opened, ['ses-other'], 'row did not jump to the owning session')
+  element = render()
+  assert.equal(element.children[2], null, 'card stayed open after navigating')
+})
+
+await test('an unowned job is shown but offers no jump', async () => {
+  const card = await cardWith({
+    activeSessions: [],
+    runningSessions: [],
+    subagentSessions: [],
+    unreadSessions: [],
+    runningJobs: [{ id: 'bash-3', owner: null, status: 'running' }],
+    unviewedJobSessionIds: [],
+    viewedSessionId: null,
+  })
+  const row = rowByKey(card, 'j:bash-3')
+  assert.ok(row, 'unowned job row missing')
+  assert.equal(row.props['data-clickable'], 'false')
+  assert.equal(row.props.onClick, undefined)
+  assert.equal(row.children[2].children[0], 'no session')
+})
+
+await test('the unread list merges both sources into one row per session', async () => {
+  const card = await cardWith({
+    activeSessions: [],
+    runningSessions: [],
+    subagentSessions: [],
+    // current + subagent must be dropped; ses-other appears in BOTH lists.
+    unreadSessions: ['ses-current', 'ses-other', 'child'],
+    runningJobs: [],
+    unviewedJobSessionIds: ['ses-other', 'ses-third'],
+    viewedSessionId: 'ses-current',
+  })
+  const rows = rowsOf(card).filter((r) => String(r.props.key).startsWith('u:'))
+
+  assert.deepEqual(rows.map((r) => r.props.key), ['u:ses-other', 'u:ses-third'])
+  assert.equal(rows[0].children[2], null, 'a plain unread session carries no job tag')
+  assert.equal(rows[1].children[2].children[0], 'finished job')
+})
+
+await test('clicking a row closes the card after navigating', async () => {
+  const card = renderCard()
+  const row = rowByKey(card, 'u:ses-third')
+  opened.length = 0
+  row.props.onClick()
+  assert.deepEqual(opened, ['ses-third'])
+  // card.open flipped false; a re-render must not include the popover.
+  element = render()
+  assert.equal(element.children[2], null, 'card stayed open after navigating')
+})
+
+await test('escape and clicks outside the badge both close the card', async () => {
+  element.children[1].props.onClick()   // reopen
+  await flush()
+  element = render()
+  assert.ok(element.children[2], 'card did not reopen')
+
+  for (const fn of docListeners.get('keydown')) fn({ key: 'Escape' })
+  element = render()
+  assert.equal(element.children[2], null, 'escape did not close the card')
+
+  element.children[1].props.onClick()   // reopen again
+  await flush()
+  element = render()
+  assert.ok(element.children[2], 'card did not reopen')
+  for (const fn of docListeners.get('mousedown')) fn({ target: { closest: () => null } })
+  element = render()
+  assert.equal(element.children[2], null, 'outside click did not close the card')
+})
+
+await test('a click on the badge itself is not an outside click', async () => {
+  element.children[1].props.onClick()   // card closed after last test; reopen
+  await flush()
+  element = render()
+  assert.ok(element.children[2], 'card did not reopen')
+
+  for (const fn of docListeners.get('mousedown')) fn({ target: { closest: () => ({}) } })
+  element = render()
+  assert.ok(element.children[2], 'badge click closed its own card')
+  // close it via the X affordance
+  const closeBtn = findAll(renderCard(), (n) => n.props && n.props.className === 'tb-close')[0]
+  closeBtn.props.onClick()
+  element = render()
+  assert.equal(element.children[2], null, 'close button did not close the card')
 })
 
 await test('the favicon badge reaches both icon links (light scheme)', async () => {

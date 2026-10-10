@@ -90,32 +90,41 @@ function apply(ctx) {
     console.log('[task-badge] jobs service not available')
   }
 
+  // One pass over jobMap shared by `getCounts` and the state route, so the
+  // badge number and the card listing can never disagree about which jobs
+  // belong to the user. Unviewed jobs are deduplicated to one entry per
+  // owning session: two finished jobs in the same conversation are one thing
+  // to look at, and a session already sitting in `unreadSessions` carries its
+  // own badge, so its jobs must not push the total to 2.
+  function jobLists() {
+    const running = []
+    const unviewedJobSessionIds = []
+
+    jobMap.forEach((job, id) => {
+      if (subagentSessions.has(job.owner)) return // subagent work, not the user's
+      if (job.status === 'running' || job.status === 'stopping') {
+        running.push({ id: id, owner: job.owner || null, status: job.status })
+        return
+      }
+      // A job counts as unread only until the user opens the session that
+      // owns it; an unowned job has no session to open, so it can never be
+      // cleared and is left out rather than sticking forever.
+      if (job.status !== 'completed') return
+      if (!job.owner) return
+      if (viewedJobIds.has(id)) return
+      if (job.owner === viewedSessionId) return // already on screen
+      if (unreadSessions.has(job.owner)) return // that session's own badge covers it
+      if (unviewedJobSessionIds.indexOf(job.owner) >= 0) return // one session, one count
+      unviewedJobSessionIds.push(job.owner)
+    })
+
+    return { running: running, unviewedJobSessionIds: unviewedJobSessionIds }
+  }
+
   function getCounts() {
     try {
-      let runningJobs = 0
-      // Unviewed jobs, deduplicated to one entry per owning session: two
-      // finished jobs in the same conversation are one thing to look at, and
-      // a session already sitting in `unreadSessions` carries its own badge,
-      // so its jobs must not push the total to 2.
-      const unviewedJobSessionIds = []
-
-      jobMap.forEach((job, id) => {
-        if (subagentSessions.has(job.owner)) return // subagent work, not the user's
-        if (job.status === 'running' || job.status === 'stopping') {
-          runningJobs++
-          return
-        }
-        // A job counts as unread only until the user opens the session that
-        // owns it; an unowned job has no session to open, so it can never be
-        // cleared and is left out rather than sticking forever.
-        if (job.status !== 'completed') return
-        if (!job.owner) return
-        if (viewedJobIds.has(id)) return
-        if (job.owner === viewedSessionId) return // already on screen
-        if (unreadSessions.has(job.owner)) return // that session's own badge covers it
-        if (unviewedJobSessionIds.indexOf(job.owner) >= 0) return // one session, one count
-        unviewedJobSessionIds.push(job.owner)
-      })
+      const lists = jobLists()
+      const runningJobs = lists.running.length
 
       let runningSessions = 0
       activeSessions.forEach((id) => {
@@ -131,8 +140,8 @@ function apply(ctx) {
         running: runningSessions + runningJobs,
         // Return the actual session IDs so client can manage read/unread locally
         unreadSessionIds,
-        unviewedJobs: unviewedJobSessionIds.length,
-        unviewedJobSessionIds
+        unviewedJobs: lists.unviewedJobSessionIds.length,
+        unviewedJobSessionIds: lists.unviewedJobSessionIds
       }
     } catch (e) {
       return { running: 0, unreadSessionIds: [], unviewedJobs: 0, unviewedJobSessionIds: [] }
@@ -189,16 +198,14 @@ function apply(ctx) {
       handler: (request, response) => {
         if (request.method === 'OPTIONS') { sendJson(response, 204, {}); return }
         if (request.method !== 'GET') { response.writeHead(405); response.end(); return }
-        const runningJobIds = []
-        jobMap.forEach((job, id) => {
-          if (job.status === 'running' || job.status === 'stopping') runningJobIds.push({ id: id, owner: job.owner, status: job.status })
-        })
+        const lists = jobLists()
         sendJson(response, 200, {
           activeSessions: Array.from(activeSessions),
           runningSessions: Array.from(activeSessions).filter((id) => !subagentSessions.has(id)),
           subagentSessions: Array.from(subagentSessions),
           unreadSessions: Array.from(unreadSessions),
-          runningJobs: runningJobIds,
+          runningJobs: lists.running,
+          unviewedJobSessionIds: lists.unviewedJobSessionIds,
           viewedSessionId,
         })
       }

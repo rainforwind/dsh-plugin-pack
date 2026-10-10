@@ -9,6 +9,92 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
   const name = "dsh-task-badge-client";
   const inject = ["timer", "sessions"];
 
+  // ── locale ───────────────────────────────────────────────────────────────
+
+  const NS = "task-badge";
+
+  const en = {
+    "card.title": "Task status",
+    "badge.running": "{n} running",
+    "badge.unread": "{n} unread",
+    "badge.tip": "{parts} — click for details",
+    "sec.running": "Running",
+    "sec.unread": "Unread",
+    "row.onscreen": "on screen",
+    "row.jobsDone": "finished job",
+    "row.inSession": "in {title}",
+    "row.noOwner": "no session",
+    "card.empty": "Nothing to report",
+    "card.close": "Close",
+  };
+
+  const zh = {
+    "card.title": "任务状态",
+    "badge.running": "{n} 个运行中",
+    "badge.unread": "{n} 个未读",
+    "badge.tip": "{parts} — 点击查看详情",
+    "sec.running": "运行中",
+    "sec.unread": "未读",
+    "row.onscreen": "当前会话",
+    "row.jobsDone": "已完成任务",
+    "row.inSession": "在 {title}",
+    "row.noOwner": "无所属会话",
+    "card.empty": "暂无内容",
+    "card.close": "关闭",
+  };
+
+  function makeT(dict) {
+    return (key, params) => {
+      let text = dict[key] != null ? dict[key] : (en[key] != null ? en[key] : key);
+      if (params) {
+        for (const name of Object.keys(params)) {
+          text = text.split("{" + name + "}").join(String(params[name]));
+        }
+      }
+      return text;
+    };
+  }
+
+  function preferredDict() {
+    try {
+      if (typeof navigator !== "undefined" && /^zh/i.test(navigator.language || "")) return zh;
+    } catch (e) { /* no navigator */ }
+    return en;
+  }
+
+  // Fallback when the locale service does not hand the component a `t`.
+  const localT = makeT(preferredDict());
+
+  // ── styles (tokens only; component-local, unmounted with the tree) ───────
+
+  const CSS = `
+.tb-wrap{position:relative;display:inline-flex}
+.tb-badge{display:flex;align-items:center;gap:4px;padding:4px 6px;border-radius:6px;cursor:pointer}
+.tb-badge:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.tb-pill{border-radius:10px;font-size:11px;font-weight:600;min-width:18px;height:18px;display:inline-flex;align-items:center;justify-content:center;padding:0 4px;color:var(--dsw-alias-label-primary-foreground);font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+.tb-pill[data-kind="running"]{background:var(--dsw-alias-state-business-primary)}
+.tb-pill[data-kind="unread"]{background:var(--dsw-alias-state-error-primary)}
+/* The badge sits in the sidebar footer, so the card opens upward like the
+   quick-actions strip does — anchored to the badge's left edge. */
+.tb-pop{position:absolute;bottom:calc(100% + 6px);left:0;z-index:60;width:min(340px,78vw);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,.32);display:flex;flex-direction:column;overflow:hidden;text-align:left;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.tb-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dsw-alias-border-l1);font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary)}
+.tb-close{border:none;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;border-radius:4px;font-family:inherit}
+.tb-close:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.tb-body{display:flex;flex-direction:column;padding:6px 0;max-height:50vh;overflow:auto}
+.tb-sectiontitle{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary);padding:4px 12px 2px}
+.tb-row{display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;font-size:12px;color:var(--dsw-alias-label-primary)}
+.tb-row:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.tb-row[data-clickable="false"]{cursor:default}
+.tb-row[data-clickable="false"]:hover{background:transparent}
+.tb-dot{width:7px;height:7px;border-radius:50%;flex:none}
+.tb-dot[data-kind="running"]{background:none;border:1.5px solid var(--dsw-alias-state-business-primary);border-right-color:transparent;animation:tb-spin .9s linear infinite}
+.tb-dot[data-kind="unread"]{background:var(--dsw-alias-state-error-primary)}
+.tb-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tb-sub{flex:none;max-width:45%;font-size:11px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tb-empty{font-size:11px;color:var(--dsw-alias-label-tertiary);padding:8px 12px}
+@keyframes tb-spin{to{transform:rotate(360deg)}}
+`;
+
   function api(path) {
     const relative = path.replace(/^\/+/, "");
     if (typeof document === "undefined") return "/" + relative;
@@ -46,20 +132,39 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
       } catch (e) { return false; }
     }
 
-    // Which session a click should open: the first unread conversation, or —
-    // when every unread conversation is already on screen — a session holding
-    // a background job that has not been read yet.
-    function pickTarget(data, cur) {
-      const ids = (data && data.unreadSessionIds) || [];
-      for (let i = 0; i < ids.length; i++) {
-        if (ids[i] !== cur && !isSubagentSession(ids[i])) return ids[i];
-      }
-      const jobOwners = (data && data.unviewedJobSessionIds) || [];
-      for (let i = 0; i < jobOwners.length; i++) {
-        if (jobOwners[i] !== cur && !isSubagentSession(jobOwners[i])) return jobOwners[i];
-      }
-      return null;
+    // Display name for a session: the projected list row carries both a
+    // human title and a derived `displayTitle`; fall back to a short id so a
+    // card row is never an opaque UUID.
+    function sessionTitle(id) {
+      if (!sessions || !id) return String(id ?? "");
+      try {
+        const row = sessions.list?.getSnapshot?.()?.byId?.[id];
+        const title = row && (row.displayTitle || row.title);
+        if (title) return String(title);
+      } catch (e) {}
+      return String(id).replace(/^session-/, "").slice(0, 8);
     }
+
+    // Navigation lives on `uiWorkspace`, not on the sessions store —
+    // `sessions` exposes retain/using/binding and has no `open()`.
+    function openSession(id) {
+      if (!id) return;
+      try {
+        const navigation = ctx.get("uiWorkspace");
+        if (navigation && typeof navigation.openSession === "function") {
+          navigation.openSession(id);
+        }
+      } catch (e) {}
+    }
+
+    // Route static strings through the host locale when it exists; components
+    // fall back to `localT` otherwise.
+    try {
+      const locale = ctx.get("locale");
+      if (locale && typeof locale.register === "function") {
+        ctx.effect(() => locale.register(NS, { zh, en }), "dsh-task-badge: dictionaries");
+      }
+    } catch (e) {}
 
     // The shell ships one icon link per color scheme
     //   <link rel="icon" ... href="favicon-dark.svg" media="(prefers-color-scheme: dark)">
@@ -201,15 +306,43 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
     const listeners = new Set();
     let alive = true;
 
+    // The detail card: closed by default, refreshed from the read-only state
+    // route whenever it is open (once on open, then on every poll tick).
+    const card = { open: false, data: null };
+
+    function notify() {
+      listeners.forEach(function (fn) {
+        try { fn(); } catch (e) {}
+      });
+    }
+
     function publishState(running, unread) {
       // Unchanged counts must not wake React up every three seconds.
       const changed = badgeState.running !== running || badgeState.unread !== unread;
       badgeState.running = running;
       badgeState.unread = unread;
       if (!changed) return;
-      listeners.forEach(function (notify) {
-        try { notify(); } catch (e) {}
-      });
+      notify();
+    }
+
+    // One fetch behind the card: `/task-badge/state` names the exact sessions
+    // and jobs behind every number, so the card and the badge can never
+    // disagree about what they are counting.
+    async function refreshCard() {
+      try {
+        const res = await fetch(api("/task-badge/state"));
+        const data = await res.json();
+        if (!alive) return;
+        card.data = data;
+        notify();
+      } catch (e) {}
+    }
+
+    function setCardOpen(open) {
+      if (card.open === open) return;
+      card.open = open;
+      if (open) refreshCard();
+      notify();
     }
 
     async function poll() {
@@ -246,6 +379,8 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
         const running = data.running || 0;
         publishState(running, count);
         setFavicon(running, count);
+        // An open card stays truthful as jobs start and finish.
+        if (card.open) refreshCard();
       } catch (e) {}
     }
 
@@ -257,61 +392,147 @@ window.__ModuleLoader__.load({ id: "dsh-task-badge", factory: (require) => {
       clearFavicon();
     }, "dsh-task-badge: badge poll");
 
+    // Click outside the badge (or Escape) dismisses the card; registered at
+    // apply level so the handler exists whether or not the badge is mounted.
+    if (typeof document !== "undefined" && document.addEventListener) {
+      ctx.effect(() => {
+        const onPointer = (event) => {
+          if (!card.open) return;
+          const target = event && event.target;
+          if (target && typeof target.closest === "function" && target.closest("[data-tb-badge]")) return;
+          setCardOpen(false);
+        };
+        const onKey = (event) => {
+          if (event && event.key === "Escape") setCardOpen(false);
+        };
+        document.addEventListener("mousedown", onPointer);
+        document.addEventListener("keydown", onKey);
+        return () => {
+          document.removeEventListener("mousedown", onPointer);
+          document.removeEventListener("keydown", onKey);
+        };
+      }, "dsh-task-badge: card dismiss");
+    }
+
+    // The detail card: every row explains one count and jumps to the session
+    // behind it -- the badge number alone left users hunting for which
+    // conversation was actually running a background job.
+    function TaskCard() {
+      const t = localT;
+      const data = card.data;
+      const cur = getCurrentSessionId();
+
+      // Subagent work is never the user's; the current session carries its
+      // own badge, so a row for it only says "you are here".
+      const runningSessions = ((data && data.runningSessions) || []).filter((id) => !isSubagentSession(id));
+      const runningJobs = (data && data.runningJobs) || [];
+
+      // Unread mirrors the badge arithmetic: drop the session on screen and
+      // subagent children, and merge the two sources so one session is one
+      // row (a finished job in an already-unread session is the same thing
+      // to look at).
+      const unreadRows = [];
+      const seen = Object.create(null);
+      const pushUnread = (id, subKey) => {
+        if (!id || id === cur || isSubagentSession(id) || seen[id]) return;
+        seen[id] = true;
+        unreadRows.push({ id: id, subKey: subKey || null });
+      };
+      ((data && data.unreadSessions) || []).forEach((id) => pushUnread(id, null));
+      ((data && data.unviewedJobSessionIds) || []).forEach((id) => pushUnread(id, "row.jobsDone"));
+
+      const runningRows = [];
+      runningSessions.forEach((id) => {
+        runningRows.push(React.createElement("div", {
+          className: "tb-row", key: "s:" + id, "data-clickable": "true",
+          onClick: () => { openSession(id); setCardOpen(false); }
+        },
+          React.createElement("span", { className: "tb-dot", "data-kind": "running" }),
+          React.createElement("span", { className: "tb-title" }, sessionTitle(id)),
+          id === cur ? React.createElement("span", { className: "tb-sub" }, t("row.onscreen")) : null
+        ));
+      });
+      runningJobs.forEach((job) => {
+        const owner = job && job.owner;
+        runningRows.push(React.createElement("div", {
+          className: "tb-row", key: "j:" + (job && job.id),
+          "data-clickable": owner ? "true" : "false",
+          onClick: owner ? () => { openSession(owner); setCardOpen(false); } : undefined
+        },
+          React.createElement("span", { className: "tb-dot", "data-kind": "running" }),
+          React.createElement("span", { className: "tb-title" }, String(job && job.id)),
+          React.createElement("span", { className: "tb-sub" },
+            owner ? t("row.inSession", { title: sessionTitle(owner) }) : t("row.noOwner"))
+        ));
+      });
+
+      const unread = unreadRows.map((entry) => React.createElement("div", {
+        className: "tb-row", key: "u:" + entry.id, "data-clickable": "true",
+        onClick: () => { openSession(entry.id); setCardOpen(false); }
+      },
+        React.createElement("span", { className: "tb-dot", "data-kind": "unread" }),
+        React.createElement("span", { className: "tb-title" }, sessionTitle(entry.id)),
+        entry.subKey ? React.createElement("span", { className: "tb-sub" }, t(entry.subKey)) : null
+      ));
+
+      const empty = runningRows.length + unread.length === 0;
+      const section = (labelKey, rows) => rows.length === 0 ? [] : [
+        React.createElement("div", { className: "tb-sectiontitle", key: labelKey + "-head" }, t(labelKey)),
+      ].concat(rows);
+
+      return React.createElement("div", {
+        className: "tb-pop", role: "dialog", "aria-label": t("card.title")
+      },
+        React.createElement("div", { className: "tb-head" },
+          React.createElement("span", null, t("card.title")),
+          React.createElement("button", {
+            className: "tb-close", title: t("card.close"),
+            onClick: () => setCardOpen(false)
+          }, "\u00d7")
+        ),
+        React.createElement("div", { className: "tb-body" },
+          empty ? React.createElement("div", { className: "tb-empty" }, t("card.empty")) : null,
+          section("sec.running", runningRows),
+          section("sec.unread", unread)
+        )
+      );
+    }
+
     function TaskBadge() {
       const [, bump] = React.useState(0);
 
       React.useEffect(() => {
-        const notify = () => bump((value) => value + 1);
-        listeners.add(notify);
-        return () => { listeners.delete(notify); };
+        const notifyFn = () => bump((value) => value + 1);
+        listeners.add(notifyFn);
+        return () => { listeners.delete(notifyFn); };
       }, []);
 
       const running = badgeState.running;
       const unreadCount = badgeState.unread;
       const total = running + unreadCount;
-      if (total === 0) return null;
+      // Stay mounted while the card is open, or the popover loses its anchor
+      // the moment the last count clears underneath it.
+      if (total === 0 && !card.open) return null;
 
-      // Click badge → navigate to first unread session
-      const handleClick = async () => {
-        try {
-          const cur = getCurrentSessionId();
-          const res = await fetch(api("/task-badge/counts"));
-          const data = await res.json();
-          const targetId = pickTarget(data, cur);
-          if (!targetId) return;
+      const parts = [];
+      if (running > 0) parts.push(localT("badge.running", { n: running }));
+      if (unreadCount > 0) parts.push(localT("badge.unread", { n: unreadCount }));
 
-          // Navigation lives on `uiWorkspace`, not on the sessions store —
-          // `sessions` exposes retain/using/binding and has no `open()`.
-          const navigation = ctx.get("uiWorkspace");
-          if (navigation && typeof navigation.openSession === "function") {
-            navigation.openSession(targetId);
-          }
-        } catch (e) {}
-      };
-
-      return React.createElement("div", {
-        onClick: handleClick,
-        title: (running > 0 ? running + " running" : "") +
-               (running > 0 && unreadCount > 0 ? ", " : "") +
-               (unreadCount > 0 ? unreadCount + " unread \u2014 click to view" : ""),
-        style: { padding: "4px 6px", display: "flex", alignItems: "center", gap: "4px", cursor: "pointer" }
-      },
-        running > 0 ? React.createElement("span", {
-          style: {
-            background: "#3b82f6", color: "white", borderRadius: "10px", fontSize: "11px", fontWeight: "600",
-            minWidth: "18px", height: "18px", display: "inline-flex",
-            alignItems: "center", justifyContent: "center", padding: "0 4px",
-            fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif"
-          }
-        }, String(running)) : null,
-        unreadCount > 0 ? React.createElement("span", {
-          style: {
-            background: "#ef4444", color: "white", borderRadius: "10px", fontSize: "11px", fontWeight: "600",
-            minWidth: "18px", height: "18px", display: "inline-flex",
-            alignItems: "center", justifyContent: "center", padding: "0 4px",
-            fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif"
-          }
-        }, String(unreadCount)) : null
+      return React.createElement("div", { className: "tb-wrap", "data-tb-badge": "1" },
+        React.createElement("style", null, CSS),
+        React.createElement("div", {
+          className: "tb-badge",
+          title: parts.length > 0 ? localT("badge.tip", { parts: parts.join(", ") }) : localT("card.empty"),
+          onClick: () => setCardOpen(!card.open)
+        },
+          running > 0 ? React.createElement("span", {
+            className: "tb-pill", "data-kind": "running"
+          }, String(running)) : null,
+          unreadCount > 0 ? React.createElement("span", {
+            className: "tb-pill", "data-kind": "unread"
+          }, String(unreadCount)) : null
+        ),
+        card.open ? React.createElement(TaskCard) : null
       );
     }
 
