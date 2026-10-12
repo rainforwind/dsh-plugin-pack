@@ -1,0 +1,4 @@
+# dsh bundle patch: inserts session-manager into the profile's host layer stack.
+- insert:
+   - id: dsh-session-manager
+     name: 'dsh-session-manager'

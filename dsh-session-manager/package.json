@@ -1,0 +1,29 @@
+{
+  "name": "dsh-session-manager",
+  "version": "1.0.0",
+  "description": "Archived-session management for DSH: permanent delete entry for archived sessions (sidebar menu + agent tool).",
+  "type": "module",
+  "main": "lib/index.js",
+  "meta": {
+    "title": "Session Manager",
+    "description": "Adds a permanent Delete entry to archived sessions' row menu and a session_delete agent tool. Only archived, idle sessions can be deleted."
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-workspace"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}
