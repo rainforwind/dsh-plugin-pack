@@ -14,15 +14,23 @@ DSH 目前的会话存储（`@deepseek-ai/dsh-session-persistence-jsonl`）明�
 
 删除是不可逆操作，Host 端在执行时重新校验（UI 与工具走同一份核心逻辑）：
 
-1. 会话必须存在于 session persistence；
-2. 会话必须在**归档集合**里（普通会话一律拒绝）；
-3. 如有正在运行的回合，先通过 `workspace/session-stop` 停止（与归档流程同一机制）并等待
-   结算；仍停不下来的拒绝删除。空闲的会话对象挂在进程里不阻塞删除。
-4. 目标目录必须解析在 persistence root 之内。
+1. 会话必须在**归档集合**里（守卫先于存在性检查——普通会话一律拒绝）；
+2. 目标目录必须解析在 persistence root 之内（先于一切副作用校验）；
+3. 驻留与活动双重结算：会话若还驻留在进程里（Session/Agent 对象未释放）或有正在
+   运行的回合，先通过 `workspace/session-stop` 停止（与归档流程同一机制）并轮询最多
+   8 秒；仍驻留（通常是某个会话视图未关闭）或仍运行则拒绝。**驻留检查不可省**——
+   主机的会话列表 = 磁盘 ∪ 驻留实例，文件删了但实例还在会以幽灵行复活。
 
-删除顺序：先 unarchive（持久化、可恢复）→ 再删除磁盘上的会话目录 → 发出
-`api-session/removed` 让客户端列表立刻刷新。会话在 workspace 记录里的残留归属会在下次
-workspace 变更或重启时被头校验自动清理。
+删除顺序：先 unarchive（持久化、可恢复）→ 删除磁盘上的会话目录 → 复查归档集合（并发
+归档变更可能丢失更新——自愈再 unarchive 一次）→ 从 workspace 记录中 `detachSession`
+（清掉持久的 `sessionIds` 归属，防止归属+摘要重新拼出行）→ 发出 `api-session/removed`
+让客户端列表立刻丢弃缓存摘要。
+
+**幽灵残留**（归档集合里有、但文件早已不存在的历史残留）走同一路径：`stat` 缺失时不
+报 not-found，而是做一次无表头的兜底清扫（扫 persistence root 下每层项目目录的
+`<encoded-id>` 残留并 force rm，含 `_no-cwd` 布局），然后照常 unarchive + detach +
+removed，把归档条目和行一起清掉。删除入口的门禁只看 `archived`，因此幽灵行也能删除
+（确认框会用专门文案说明「会话文件已不存在，清除的是残留记录」）。
 
 磁盘路径推导与 JSONL 后端完全一致：
 `<root>/--<normalized-cwd>--/<encoded-id>/`（无 cwd 时为 `<root>/_no-cwd/<encoded-id>/`）。

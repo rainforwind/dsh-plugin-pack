@@ -24,6 +24,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'menu.delete': 'Delete…',
     'confirm.title': 'Delete archived session?',
     'confirm.desc': 'Permanently deletes “{title}” and its session log. This cannot be undone.',
+    'confirm.desc.ghost': 'Removes the leftover entry for “{title}” — its session files are already gone. This cannot be undone.',
     'confirm.action': 'Delete permanently',
     'cancel': 'Cancel',
     'pending': 'Deleting…',
@@ -31,6 +32,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'err.not-found': 'This session no longer exists.',
     'err.not-archived': 'This session is no longer archived.',
     'err.live': 'This session is still running and would not stop; try again once it settles.',
+    'err.resident': 'This session is still open somewhere; close it and retry.',
     'err.no-backend': 'Session storage does not support deletion here.',
     'err.no-registry': 'The workspace registry is unavailable.',
     'err.io': 'Could not remove the session files.',
@@ -45,6 +47,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'menu.delete': '删除…',
     'confirm.title': '删除已归档会话？',
     'confirm.desc': '将永久删除“{title}”及其会话日志，此操作无法撤销。',
+    'confirm.desc.ghost': '将清除“{title}”的残留归档记录——其会话文件早已不存在，无法撤销。',
     'confirm.action': '永久删除',
     'cancel': '取消',
     'pending': '正在删除…',
@@ -52,6 +55,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'err.not-found': '该会话已不存在。',
     'err.not-archived': '该会话已不在归档中。',
     'err.live': '该会话仍在运行且未能停止，请稍后重试。',
+    'err.resident': '该会话仍被某处占用（视图未关闭），请关闭后重试。',
     'err.no-backend': '当前会话存储不支持删除。',
     'err.no-registry': '工作区注册表不可用。',
     'err.io': '无法删除会话文件。',
@@ -194,25 +198,26 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
 
   function DeleteMenuItem({ sessionId, displayTitle, useMenuOpenState, requestDelete, t }) {
     const [, setMenuOpen] = useMenuOpenState()
-    const [allowed, setAllowed] = React.useState(false)
+    const [state, setState] = React.useState(null)
     React.useEffect(() => {
       let alive = true
       const controller = typeof AbortController === 'function' ? new AbortController() : undefined
       const signal = controller ? controller.signal : undefined
       getState(sessionId, signal)
-        .then((state) => {
-          // The row applies to archived sessions; a running turn is settled by
-          // the Host's delete flow (stop-then-delete), so `live` does not hide it.
-          if (alive) setAllowed(!!(state && state.exists && state.archived))
+        .then((next) => {
+          // Archived is the only gate: a running turn is settled by the Host's
+          // delete flow (stop-then-delete), and a ghost (files gone, archive
+          // entry left behind) must stay deletable — it cleans the residue.
+          if (alive) setState(next || null)
         })
         .catch((error) => {
           if (!alive) return
-          setAllowed(false)
+          setState(null)
           console.log('[session-manager] state lookup failed for', sessionId, String(error && error.message || error))
         })
       return () => { alive = false; if (controller) controller.abort() }
     }, [sessionId])
-    if (!allowed) return null
+    if (!state || !state.archived) return null
     const tFn = t || localT
     return h('div', { className: 'sm-wrap' },
       h(Styles),
@@ -223,7 +228,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
         className: 'sm-item',
         onClick: () => {
           setMenuOpen(false)
-          requestDelete(sessionId, displayTitle || sessionId)
+          requestDelete(sessionId, displayTitle || sessionId, state.exists !== false)
         },
       },
       h('span', { className: 'sm-icon' }, h(TrashIcon)),
@@ -293,7 +298,9 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     },
     h('div', { className: 'sm-dialog-head', id: titleId }, tFn('confirm.title')),
     h('div', { className: 'sm-dialog-body' },
-      tFn('confirm.desc', { title: pending.displayTitle }),
+      pending.exists === false
+        ? tFn('confirm.desc.ghost', { title: pending.displayTitle })
+        : tFn('confirm.desc', { title: pending.displayTitle }),
       deleting && h('div', { className: 'sm-status', role: 'status' }, tFn('pending')),
       error && h('div', { className: 'sm-error', role: 'alert' }, error)),
     h('div', { className: 'sm-dialog-foot' },
@@ -323,7 +330,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
 
     // One pending request links the menu row to the overlay dialog.
     const pending = makeStore(null)
-    const requestDelete = (sessionId, displayTitle) => pending.set({ sessionId, displayTitle })
+    const requestDelete = (sessionId, displayTitle, exists) => pending.set({ sessionId, displayTitle, exists })
     const dismissPending = () => pending.set(null)
 
     ctx.effect(() => slots.inject('sidebar.workspaces.session.menu.item', () => {

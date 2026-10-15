@@ -10,19 +10,25 @@
 //   * the session must exist in session persistence,
 //   * it must be archived (the registry-global archive set is the guard; a
 //     normal session is never deleted, only a hidden one the user archived),
-//   * it must not be live in this process (no Session object, no Agent),
+//   * it must not be resident in this process (no Session object, no Agent)
+//     and have no active work; both are settled first through
+//     `workspace/session-stop` with a grace period, because the session list
+//     merges disk with resident instances — a fileless resident Session would
+//     resurrect as a ghost row,
 //   * the target directory must resolve inside the persistence root.
 //
 // Deletion order: unarchive first (durable, reversible), then remove the
-// session-owned directory, then tell the Client list feed to drop the cached
-// summary by emitting `api-session/removed` — the same event the Session
-// Controller emits when a live Session is disposed.
+// session-owned directory, then detach the workspace record's membership
+// (durable `sessionIds` slot) so the row cannot be rebuilt, then tell the
+// Client list feed to drop the cached summary by emitting
+// `api-session/removed` — the same event the Session Controller emits when a
+// live Session is disposed.
 //
 // Path derivation mirrors @deepseek-ai/dsh-session-persistence-jsonl
 // `projectKey`/`encodeSegment` exactly:
 //   <root>/--<normalized-cwd>--/<encoded-id>/   (or <root>/_no-cwd/<id>/)
 
-import { rm } from 'node:fs/promises'
+import { readdir, rm } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
 
 const NAME = 'dsh-session-manager'
@@ -70,6 +76,32 @@ function sessionDir(root, cwd, id) {
   return join(project, encodeSegment(id))
 }
 
+/**
+ * Remove residue for a ghost session whose header is gone: every
+ * `<root>/<project>/<encoded-id>` (plus the raw-id and `_no-cwd` variants).
+ * The sweep only descends one level below the persistence root, never follows
+ * directory symlinks, and re-checks containment per candidate. `root` must be
+ * a resolved absolute path.
+ */
+async function sweepGhostResidue(root, sessionId) {
+  let entries
+  try {
+    entries = await readdir(root, { withFileTypes: true })
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return
+    throw error
+  }
+  const names = new Set([encodeSegment(sessionId), sessionId])
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    for (const name of names) {
+      const candidate = resolve(join(root, entry.name, name))
+      if (candidate === root || !candidate.startsWith(root + sep)) continue
+      await rm(candidate, { recursive: true, force: true })
+    }
+  }
+}
+
 function isValidSessionId(value) {
   return typeof value === 'string' && value.length > 0 && value.length <= 512
 }
@@ -79,11 +111,19 @@ function sleep(ms) {
 }
 
 /**
+ * Whether the session is resident in this process (a Session object or Agent
+ * holds it). The session list merges disk with resident instances, so a
+ * fileless resident session resurrects as a ghost row after deletion.
+ */
+function sessionIsResident(ctx, sessionId) {
+  const sessions = ctx.get('sessions')
+  const agents = ctx.get('agents')
+  return !!((sessions && sessions.get(sessionId)) || (agents && agents.get(sessionId)))
+}
+
+/**
  * Whether a session currently has active work, through the same
- * `workspace/session-activity` waterfall the archive flow consults. A merely
- * registered (idle) session is not active: its carrier keeps the agent object
- * in the session map indefinitely, so map membership alone must not block
- * deletion of an archived session.
+ * `workspace/session-activity` waterfall the archive flow consults.
  */
 function activeActivity(ctx, sessionId) {
   return ctx.waterfall('workspace/session-activity', { sessionId }, () => Promise.resolve([]))
@@ -113,7 +153,7 @@ async function stopSessionActivity(ctx, sessionId) {
  * @param sessionId - the session to delete.
  * @returns the deletion outcome.
  */
-async function deleteArchivedSession(ctx, sessionId) {
+async function deleteArchivedSession(ctx, sessionId, options = {}) {
   if (!isValidSessionId(sessionId)) {
     return { ok: false, code: 'invalid-id', message: 'sessionId must be a non-empty string' }
   }
@@ -129,14 +169,14 @@ async function deleteArchivedSession(ctx, sessionId) {
       message: 'the session persistence backend does not expose its root directory; deletion is unsupported in this composition',
     }
   }
-  const snapshot = await persistence.stat(sessionId)
-  if (!snapshot) {
-    return { ok: false, code: 'not-found', message: `session '${sessionId}' does not exist in session persistence` }
-  }
   const registry = ctx.get('workspaceRegistry')
   if (!registry || !Array.isArray(registry.archivedSessionIds)) {
     return { ok: false, code: 'no-registry', message: 'the workspace registry is unavailable; the archived guard cannot be checked' }
   }
+  // The archived guard runs BEFORE existence: a ghost — an archived entry
+  // whose files are long gone — is exactly the residue that must stay
+  // deletable, and it clears through the same unarchive → detach → removed
+  // path with a headerless filesystem sweep.
   if (!registry.archivedSessionIds.includes(sessionId)) {
     return {
       ok: false,
@@ -144,43 +184,60 @@ async function deleteArchivedSession(ctx, sessionId) {
       message: `session '${sessionId}' is not archived; only archived sessions can be deleted`,
     }
   }
-  // Stop any active work first, the way the archive flow does, then wait for
-  // it to settle: an archived session may still hold a running turn.
-  let activity
+  const snapshot = await persistence.stat(sessionId)
+  const resolvedRoot = resolve(root)
+  let dir
+  if (snapshot) {
+    try {
+      dir = resolve(sessionDir(root, snapshot.header && snapshot.header.cwd, sessionId))
+    } catch (error) {
+      return { ok: false, code: 'io', message: `cannot derive the session directory: ${String(error && error.message || error)}` }
+    }
+    if (dir === resolvedRoot || !dir.startsWith(resolvedRoot + sep)) {
+      return { ok: false, code: 'io', message: 'refusing to delete a path outside the session persistence root' }
+    }
+  }
+  // Settle residency and active work first, the way the archive flow stops
+  // activity: the session list merges disk with resident instances, so
+  // deleting files under a still-resident Session would leave a ghost row that
+  // reappears from memory. Stop providers release the job/schedule/subagent
+  // carriers that often keep an archived session resident; a viewing tab's
+  // carrier only releases when that view closes.
   try {
-    activity = await activeActivity(ctx, sessionId)
-    if (!Array.isArray(activity)) throw new Error('workspace/session-activity returned a non-array result')
+    const initialActivity = await activeActivity(ctx, sessionId)
+    if (!Array.isArray(initialActivity)) throw new Error('workspace/session-activity returned a non-array result')
+    let activity = initialActivity.length
+    let resident = sessionIsResident(ctx, sessionId)
+    if (activity > 0 || resident) {
+      await stopSessionActivity(ctx, sessionId)
+      const graceMs = Number.isFinite(options.graceMs) ? options.graceMs : 8000
+      const deadline = Date.now() + graceMs
+      while ((activity > 0 || resident) && Date.now() < deadline) {
+        await sleep(250)
+        const next = await activeActivity(ctx, sessionId)
+        if (!Array.isArray(next)) throw new Error('workspace/session-activity returned a non-array result')
+        activity = next.length
+        resident = sessionIsResident(ctx, sessionId)
+      }
+      if (resident || activity > 0) {
+        const parent = snapshot && snapshot.header && snapshot.header.parentSession
+        return resident
+          ? {
+              ok: false,
+              code: 'resident',
+              message: parent
+                ? `session '${sessionId}' is a delegated child of '${parent}' and is still held in this process; stop that delegation (team/subagent) and retry`
+                : `session '${sessionId}' is still resident in this process (its view or work has not released it); close it and try again`,
+            }
+          : {
+              ok: false,
+              code: 'live',
+              message: `session '${sessionId}' is still running active work that did not stop; try again once it settles`,
+            }
+      }
+    }
   } catch (error) {
     return { ok: false, code: 'registry', message: `the session activity check failed: ${String(error && error.message || error)}` }
-  }
-  if (activity.length > 0) {
-    await stopSessionActivity(ctx, sessionId)
-    const deadline = Date.now() + 4000
-    while (activity.length > 0 && Date.now() < deadline) {
-      await sleep(250)
-      try {
-        activity = await activeActivity(ctx, sessionId)
-      } catch (error) {
-        return { ok: false, code: 'registry', message: `the session activity check failed: ${String(error && error.message || error)}` }
-      }
-    }
-    if (activity.length > 0) {
-      return {
-        ok: false,
-        code: 'live',
-        message: `session '${sessionId}' is still running active work that did not stop; try again once it settles`,
-      }
-    }
-  }
-  let dir
-  try {
-    dir = resolve(sessionDir(root, snapshot.header && snapshot.header.cwd, sessionId))
-  } catch (error) {
-    return { ok: false, code: 'io', message: `cannot derive the session directory: ${String(error && error.message || error)}` }
-  }
-  const resolvedRoot = resolve(root)
-  if (dir === resolvedRoot || !dir.startsWith(resolvedRoot + sep)) {
-    return { ok: false, code: 'io', message: 'refusing to delete a path outside the session persistence root' }
   }
   // Unarchive first: it is durable and reversible, so a later filesystem
   // failure leaves the session visible again instead of half-deleted.
@@ -190,9 +247,49 @@ async function deleteArchivedSession(ctx, sessionId) {
     return { ok: false, code: 'registry', message: `cannot unarchive the session: ${String(error && error.message || error)}` }
   }
   try {
-    await rm(dir, { recursive: true, force: true })
+    if (dir) {
+      await rm(dir, { recursive: true, force: true })
+    } else {
+      await sweepGhostResidue(resolvedRoot, sessionId)
+    }
   } catch (error) {
     return { ok: false, code: 'io', message: `cannot remove the session directory: ${String(error && error.message || error)}` }
+  }
+  // Re-read the archived set after the filesystem step: concurrent archive
+  // mutations can lose an update, and a resurrection here is exactly how
+  // deleted sessions came back as ghosts. Self-heal once, best-effort.
+  try {
+    if (registry.archivedSessionIds.includes(sessionId)) await registry.unarchiveSession(sessionId)
+  } catch (error) {
+    ctx.logger && ctx.logger.warn(`${NAME}: re-unarchive for '${sessionId}' failed: ${String(error && error.message || error)}`)
+  }
+  // Drop the durable workspace membership next: the workspace record keeps a
+  // `sessionIds` slot per session, and a stale slot plus any later summary
+  // source can rebuild the row. Resolve by the session's cwd first (a session
+  // belongs to at most one workspace — attach validates cwd equality), then
+  // scan the registry entities as a fallback for a vanished cwd. Both paths
+  // are idempotent (detachSession filters) and best-effort: the read-time path
+  // filter self-heals the record on the next header index.
+  try {
+    const candidates = []
+    const cwd = snapshot && snapshot.header && snapshot.header.cwd
+    if (typeof cwd === 'string' && cwd.length > 0 && typeof registry.resolveByPath === 'function') {
+      try {
+        // resolveByPath canonicalizes internally and rejects on a missing path.
+        const workspace = await registry.resolveByPath(cwd)
+        if (workspace) candidates.push(workspace)
+      } catch (error) { /* cwd gone — the scan below still covers membership */ }
+    }
+    const entities = registry.entities
+    if (entities && typeof entities.values === 'function') {
+      for (const entity of entities.values()) if (!candidates.includes(entity)) candidates.push(entity)
+    }
+    for (const workspace of candidates) {
+      if (!workspace || typeof workspace.detachSession !== 'function') continue
+      await workspace.detachSession(sessionId)
+    }
+  } catch (error) {
+    ctx.logger && ctx.logger.warn(`${NAME}: workspace detach for '${sessionId}' failed: ${String(error && error.message || error)}`)
   }
   // Drop the Client's cached summary; the workspace follow stream carries the
   // archive-set change on its own.
@@ -201,31 +298,59 @@ async function deleteArchivedSession(ctx, sessionId) {
   } catch (error) {
     ctx.logger && ctx.logger.warn(`${NAME}: api-session/removed emission failed`)
   }
-  ctx.logger && ctx.logger.info(`${NAME}: deleted archived session '${sessionId}'`)
-  return { ok: true, sessionId }
+  ctx.logger && ctx.logger.info(`${NAME}: deleted archived session '${sessionId}'${snapshot ? '' : ' (ghost residue)'}`)
+  return { ok: true, sessionId, ghost: !snapshot }
 }
 
 /**
- * Describe one session for the row menu: existence, archived, and active
- * work. `live` means a running turn, not mere registration — the same
- * activity semantics the deletion core enforces.
+ * Describe one session for the row menu: existence, archived, and whether it
+ * is resident or running work — the same liveness semantics the deletion core
+ * enforces before touching anything.
  * @param ctx - the plugin's Cordis context.
  * @param sessionId - the session to describe.
  * @returns {Promise<{ exists: boolean, archived: boolean, live: boolean }>}
  */
 async function describeSession(ctx, sessionId) {
   const registry = ctx.get('workspaceRegistry')
-  let live = false
+  const persistence = ctx.get('sessionPersistence')
+  let exists = false
+  let header
   try {
-    const activity = await activeActivity(ctx, sessionId)
-    live = Array.isArray(activity) && activity.length > 0
+    const snapshot = persistence && typeof persistence.stat === 'function' ? await persistence.stat(sessionId) : null
+    if (snapshot) {
+      exists = true
+      header = snapshot.header
+    }
   } catch (error) {
-    live = true
+    exists = false
   }
+  // Split the residency sources so a refused delete is diagnosable: which map
+  // holds the instance (a view/carrier or an agent), how much active work
+  // there is, and whether the session is a delegated child (the delegation
+  // graph — subagent/team — is what usually keeps such a child resident).
+  const sessions = ctx.get('sessions')
+  const agents = ctx.get('agents')
+  const residentSessions = !!(sessions && sessions.get(sessionId))
+  const residentAgents = !!(agents && agents.get(sessionId))
+  let activity = 0
+  let activityUnknown = false
+  try {
+    const list = await activeActivity(ctx, sessionId)
+    if (Array.isArray(list)) activity = list.length
+    else activityUnknown = true
+  } catch (error) {
+    activityUnknown = true
+  }
+  const live = residentSessions || residentAgents || activityUnknown || activity > 0
   return {
-    exists: true,
+    exists,
     archived: !!(registry && Array.isArray(registry.archivedSessionIds) && registry.archivedSessionIds.includes(sessionId)),
     live,
+    resident: { sessions: residentSessions, agents: residentAgents },
+    activity,
+    activityUnknown,
+    parentSession: (header && header.parentSession) || undefined,
+    isSeeded: !!(header && header.isSeeded),
   }
 }
 
@@ -277,6 +402,7 @@ const STATUS_BY_CODE = {
   'not-found': 404,
   'not-archived': 409,
   'live': 409,
+  'resident': 409,
   'no-backend': 503,
   'no-registry': 503,
   'registry': 500,
@@ -284,6 +410,9 @@ const STATUS_BY_CODE = {
 }
 
 export const inject = ['webServer']
+// Exported for offline verification of the shared core (the HTTP route and
+// the agent tool both call it through apply's closure).
+export { deleteArchivedSession, describeSession, sessionDir }
 
 export function apply(ctx) {
   ctx.inject(['webServer'], (hostCtx) => {
@@ -309,18 +438,10 @@ export function apply(ctx) {
         sendJson(response, 400, { ok: false, error: 'invalid-id', message: 'sessionId query parameter is required' })
         return
       }
-      // Existence needs an async persistence read; run it through the shared
-      // core's validation path without deleting.
+      // Existence and the residency split come from the shared describer.
       void (async () => {
-        const persistence = ctx.get('sessionPersistence')
-        let exists = false
-        try {
-          exists = !!(persistence && await persistence.stat(sessionId))
-        } catch (error) {
-          exists = false
-        }
         const state = await describeSession(ctx, sessionId)
-        sendJson(response, 200, { ok: true, state: { ...state, exists } })
+        sendJson(response, 200, { ok: true, state })
       })()
     })
 
@@ -341,7 +462,7 @@ export function apply(ctx) {
         return
       }
       const result = await deleteArchivedSession(ctx, body && body.sessionId)
-      if (result.ok) { sendJson(response, 200, { ok: true, sessionId: result.sessionId }); return }
+      if (result.ok) { sendJson(response, 200, { ok: true, sessionId: result.sessionId, ghost: result.ghost === true }); return }
       sendJson(response, STATUS_BY_CODE[result.code] || 500, { ok: false, error: result.code, message: result.message })
     })
   })
