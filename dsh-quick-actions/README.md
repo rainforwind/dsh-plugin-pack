@@ -25,9 +25,23 @@ JSON store 默认路径：`$DSH_PROFILE_DIR/dsh-quick-actions.json`，未设置�
   workdir: /srv/app  # 可选；缺省时依次取 config.workdir → workspace 目录
   scope: workspace   # global | workspace | session，默认 global
   target: ws-a       # 可选，钉死到某个 workspace id / session id
+  params:            # 可选，运行时参数（最多 8 个）
+    - name: count    # 必填，[A-Za-z][A-Za-z0-9_]{0,31}，全按钮唯一
+      required: true # 默认 true；false 即可选
+      default: '5'   # 可选，预填值；必填参数缺省时以默认值兜底
 ```
 
 `{workspace}` / `{session}` 在事实已知时展开（workspace 目录、当前会话 id），未知时**保留字面量**——占位符没被展开必须看得见，而不是静默变成空串。
+
+## 参数（带参执行）
+
+一条定义的 `params` 把「输入框的集合」声明给按钮：
+
+- **定义**在「+」管理面板的 Parameters 区：每行填名称、默认值、勾「必填」，可增删（上限 8 个）。名称非法/重复在保存前就被拦下。
+- **取值**在按钮卡片（popover / 放大模态）里：每个参数渲染一行输入框，必填项带红色星号，预填默认值；必填项留空时 Run 禁用（提交被拒也会显示 `missing-param:<name>` 原因）。
+- **执行**时 `{name}` 占位符替换成提交的值——先展开 `{workspace}`/`{session}`，再替换参数；未提交（或提交空串）且无默认值的占位符**保留字面量**。请求里不属于该按钮 `params` 的键一律丢弃（陈旧客户端无法注入任意占位符）。
+- 按钮有 `params` 时点芯片**不自动运行**，只打开卡片（折叠侧栏下打开放大模态）让用户先填值；无参数按钮保持「点击即运行」。
+- 实例键与参数无关：同一个共享实例（global/workspace）**带不同的参数值仍是同一次运行**（第二次点击是加入），运行记录回显当次使用的参数值。
 
 ## scope 的两层含义
 
@@ -92,7 +106,7 @@ node test/run.mjs      # Host 半：scope 可见性/实例共享、执行生命�
 node test/client.mjs   # 浏览器半：槽位注册、按钮拉取、运行与 popover 输出、放大面板、「+」配置面板增删保存、失败提示、Esc
 ```
 
-覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换。
+覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；参数：必填缺失在 shell 启动前拒绝（400 `missing-param:<name>`）、值替换与回显、未知参数键丢弃、定义经 config 落盘往返、非法/重名参数的字段级报错；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换；参数：带参按钮点芯片只开卡片不运行、卡片填值后 POST 携带 `params`、管理面板可声明参数行。
 
 ## 卸载
 
