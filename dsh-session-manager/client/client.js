@@ -26,13 +26,14 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'confirm.desc': 'Permanently deletes “{title}” and its session log. This cannot be undone.',
     'confirm.desc.ghost': 'Removes the leftover entry for “{title}” — its session files are already gone. This cannot be undone.',
     'confirm.action': 'Delete permanently',
+    'confirm.force': 'Force delete (held instance)',
     'cancel': 'Cancel',
     'pending': 'Deleting…',
     'err.invalid-id': 'No session was selected.',
     'err.not-found': 'This session no longer exists.',
     'err.not-archived': 'This session is no longer archived.',
     'err.live': 'This session is still running and would not stop; try again once it settles.',
-    'err.resident': 'This session is still open somewhere; close it and retry.',
+    'err.resident': 'This session is still open somewhere; close it and retry, or force the delete (running work still refuses).',
     'err.no-backend': 'Session storage does not support deletion here.',
     'err.no-registry': 'The workspace registry is unavailable.',
     'err.io': 'Could not remove the session files.',
@@ -49,13 +50,14 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'confirm.desc': '将永久删除“{title}”及其会话日志，此操作无法撤销。',
     'confirm.desc.ghost': '将清除“{title}”的残留归档记录——其会话文件早已不存在，无法撤销。',
     'confirm.action': '永久删除',
+    'confirm.force': '强制删除（实例占用中）',
     'cancel': '取消',
     'pending': '正在删除…',
     'err.invalid-id': '未选择任何会话。',
     'err.not-found': '该会话已不存在。',
     'err.not-archived': '该会话已不在归档中。',
     'err.live': '该会话仍在运行且未能停止，请稍后重试。',
-    'err.resident': '该会话仍被某处占用（视图未关闭），请关闭后重试。',
+    'err.resident': '该会话仍被某处占用；可关闭后重试，或强制删除（运行中的会话始终拒绝）。',
     'err.no-backend': '当前会话存储不支持删除。',
     'err.no-registry': '工作区注册表不可用。',
     'err.io': '无法删除会话文件。',
@@ -144,11 +146,11 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
   const getState = (sessionId, signal) =>
     requestJson(`/dsh-session-manager/state?sessionId=${encodeURIComponent(sessionId)}`, { signal }).then((data) => data.state)
 
-  const postDelete = (sessionId) =>
+  const postDelete = (sessionId, force) =>
     requestJson('/dsh-session-manager/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId }),
+      body: JSON.stringify({ sessionId, force: force === true }),
     })
 
   // ── styles (theme tokens only; component-local, unmount with the tree) ────
@@ -241,6 +243,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     const pending = usePending((value) => value)
     const [deleting, setDeleting] = React.useState(false)
     const [error, setError] = React.useState(null)
+    const [forceOffered, setForceOffered] = React.useState(false)
     const cancelRef = React.useRef(null)
     const restoreRef = React.useRef(null)
     const tFn = t || localT
@@ -248,6 +251,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
       if (!pending) return undefined
       setDeleting(false)
       setError(null)
+      setForceOffered(false)
       restoreRef.current = typeof document !== 'undefined' ? document.activeElement : null
       const focusTimer = setTimeout(() => {
         try { if (cancelRef.current) cancelRef.current.focus() } catch (error) { /* no focus */ }
@@ -270,16 +274,19 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     }, [pending])
     if (!pending) return null
     const close = () => { if (!deleting) dismissPending() }
-    const confirm = () => {
+    const runDelete = (force) => {
       setDeleting(true)
       setError(null)
-      postDelete(pending.sessionId)
+      postDelete(pending.sessionId, force)
         .then(() => { setDeleting(false); dismissPending() })
         .catch((reason) => {
           setDeleting(false)
           // Known refusal codes get the localized copy; requestJson already
-          // localized network/HTTP failures in its message.
+          // localized network/HTTP failures in its message. A 'resident'
+          // refusal (idle held instance) offers the force path; the Host
+          // never lets force bypass running work, so 'live' hides it again.
           const code = reason && reason.code
+          setForceOffered(code === 'resident')
           if (code && Object.prototype.hasOwnProperty.call(en, 'err.' + code)) setError(tFn('err.' + code))
           else setError((reason && reason.message) || tFn('err.generic'))
         })
@@ -307,8 +314,12 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
       h('button', {
         type: 'button', className: 'sm-btn', disabled: deleting, ref: cancelRef, onClick: close,
       }, tFn('cancel')),
+      forceOffered && h('button', {
+        type: 'button', className: 'sm-btn', disabled: deleting,
+        onClick: () => runDelete(true),
+      }, tFn('confirm.force')),
       h('button', {
-        type: 'button', className: 'sm-btn', 'data-kind': 'danger', disabled: deleting, onClick: confirm,
+        type: 'button', className: 'sm-btn', 'data-kind': 'danger', disabled: deleting, onClick: () => runDelete(false),
       }, tFn('confirm.action')))))
   }
 

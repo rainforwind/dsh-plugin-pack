@@ -203,6 +203,14 @@ async function deleteArchivedSession(ctx, sessionId, options = {}) {
   // reappears from memory. Stop providers release the job/schedule/subagent
   // carriers that often keep an archived session resident; a viewing tab's
   // carrier only releases when that view closes.
+  //
+  // options.force is the escape hatch for a resident-but-idle session whose
+  // carrier never released (the registries expose no per-id release API). It
+  // bypasses ONLY residency, never running work: activity > 0 refuses even
+  // with force. A forced delete leaves the in-memory instance alive until
+  // restart; the detached membership + `api-session/removed` keep the row out
+  // of the lists meanwhile.
+  let forced = false
   try {
     const initialActivity = await activeActivity(ctx, sessionId)
     if (!Array.isArray(initialActivity)) throw new Error('workspace/session-activity returned a non-array result')
@@ -219,21 +227,26 @@ async function deleteArchivedSession(ctx, sessionId, options = {}) {
         activity = next.length
         resident = sessionIsResident(ctx, sessionId)
       }
-      if (resident || activity > 0) {
-        const parent = snapshot && snapshot.header && snapshot.header.parentSession
-        return resident
-          ? {
-              ok: false,
-              code: 'resident',
-              message: parent
-                ? `session '${sessionId}' is a delegated child of '${parent}' and is still held in this process; stop that delegation (team/subagent) and retry`
-                : `session '${sessionId}' is still resident in this process (its view or work has not released it); close it and try again`,
-            }
-          : {
-              ok: false,
-              code: 'live',
-              message: `session '${sessionId}' is still running active work that did not stop; try again once it settles`,
-            }
+      if (activity > 0) {
+        return {
+          ok: false,
+          code: 'live',
+          message: `session '${sessionId}' is still running active work that did not stop; try again once it settles`,
+        }
+      }
+      if (resident) {
+        if (options.force !== true) {
+          const parent = snapshot && snapshot.header && snapshot.header.parentSession
+          return {
+            ok: false,
+            code: 'resident',
+            message: parent
+              ? `session '${sessionId}' is a delegated child of '${parent}' and is still held in this process; stop that delegation (team/subagent) and retry — or force the delete`
+              : `session '${sessionId}' is still resident in this process (its view or work has not released it); close it and try again — or force the delete`,
+          }
+        }
+        forced = true
+        ctx.logger && ctx.logger.warn(`${NAME}: force-deleting resident idle session '${sessionId}'; its in-memory instance stays until restart`)
       }
     }
   } catch (error) {
@@ -298,8 +311,8 @@ async function deleteArchivedSession(ctx, sessionId, options = {}) {
   } catch (error) {
     ctx.logger && ctx.logger.warn(`${NAME}: api-session/removed emission failed`)
   }
-  ctx.logger && ctx.logger.info(`${NAME}: deleted archived session '${sessionId}'${snapshot ? '' : ' (ghost residue)'}`)
-  return { ok: true, sessionId, ghost: !snapshot }
+  ctx.logger && ctx.logger.info(`${NAME}: deleted archived session '${sessionId}'${snapshot ? '' : ' (ghost residue)'}${forced ? ' (forced)' : ''}`)
+  return { ok: true, sessionId, ghost: !snapshot, forced }
 }
 
 /**
@@ -461,8 +474,13 @@ export function apply(ctx) {
         sendJson(response, 400, { ok: false, error: 'bad-request', message: String(error && error.message || error) })
         return
       }
-      const result = await deleteArchivedSession(ctx, body && body.sessionId)
-      if (result.ok) { sendJson(response, 200, { ok: true, sessionId: result.sessionId, ghost: result.ghost === true }); return }
+      // The UI may send force after a 'resident' refusal; the core enforces
+      // that force never bypasses running work. The agent tool never forces.
+      const result = await deleteArchivedSession(ctx, body && body.sessionId, { force: body && body.force === true })
+      if (result.ok) {
+        sendJson(response, 200, { ok: true, sessionId: result.sessionId, ghost: result.ghost === true, forced: result.forced === true })
+        return
+      }
       sendJson(response, STATUS_BY_CODE[result.code] || 500, { ok: false, error: result.code, message: result.message })
     })
   })

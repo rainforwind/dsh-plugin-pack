@@ -21,6 +21,14 @@ DSH 目前的会话存储（`@deepseek-ai/dsh-session-persistence-jsonl`）明�
    8 秒；仍驻留（通常是某个会话视图未关闭）或仍运行则拒绝。**驻留检查不可省**——
    主机的会话列表 = 磁盘 ∪ 驻留实例，文件删了但实例还在会以幽灵行复活。
 
+**强制删除（force）**：驻留的注册表没有按 id 释放的 API（唯一全局 `disposeInitiators`
+会杀掉一切，包括当前会话），所以对**驻留但空闲**的会话提供逃生门——确认框在收到
+`resident` 拒绝后出现「强制删除」按钮，请求带 `force: true`。宿主强制要求
+**activity == 0**：`force` 只绕过驻留、从不绕过正在运行的回合（有活动回合时
+`force` 依旧返回 `live` 拒绝）。被强制删除的会话其内存实例会存活到下次重启，但
+归属已 detach、`api-session/removed` 已发出，行不会回列表（重启后实例随进程消失，
+彻底干净）。`session_delete` 工具**永不**强制。
+
 删除顺序：先 unarchive（持久化、可恢复）→ 删除磁盘上的会话目录 → 复查归档集合（并发
 归档变更可能丢失更新——自愈再 unarchive 一次）→ 从 workspace 记录中 `detachSession`
 （清掉持久的 `sessionIds` 归属，防止归属+摘要重新拼出行）→ 发出 `api-session/removed`
@@ -37,9 +45,13 @@ removed，把归档条目和行一起清掉。删除入口的门禁只看 `archi
 
 ## HTTP 接口（浏览器半与 Host 半通信）
 
-- `GET /dsh-session-manager/state?sessionId=…` → `{ ok, state: { exists, archived, live } }`
-- `POST /dsh-session-manager/delete` body `{ sessionId }` → `{ ok: true }` 或
-  `{ ok: false, error: <code>, message }`
+- `GET /dsh-session-manager/state?sessionId=…` →
+  `{ ok, state: { exists, archived, live, resident: { sessions, agents },
+  activity, activityUnknown, parentSession?, isSeeded } }`（诊断拆分：
+  `resident` 说哪个注册表持有实例，`activity` 是活动回合数，`parentSession`
+  标出委托子会话——拒绝消息会点名父级）
+- `POST /dsh-session-manager/delete` body `{ sessionId, force? }` →
+  `{ ok: true, ghost, forced }` 或 `{ ok: false, error: <code>, message }`
 
 ## 注意
 
