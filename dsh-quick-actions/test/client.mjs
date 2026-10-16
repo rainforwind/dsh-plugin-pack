@@ -171,6 +171,14 @@ let buttonsResponse = {}
 let runGetResponse = { ok: true, run: null }
 let runPostResponse = { ok: true, joined: false, instanceKey: 'g:clean', run: null }
 let configResponse = { ok: true, buttons: [], configButtons: [], storePath: '/tmp/qa.json' }
+configResponse = {
+  ok: true,
+  buttons: [
+    { id: 'greet', label: 'Greet', icon: '', command: 'echo Hello {name}', workdir: '', scope: 'global', target: '', source: 'store', params: [{ name: 'name', required: true, default: '' }, { name: 'dir', required: false, default: '/tmp' }] },
+  ],
+  configButtons: [],
+  storePath: '/tmp/qa.json',
+}
 let configPostResponse = { ok: true, buttons: [], configButtons: [] }
 let runPostStatus = 200
 const fetchCalls = []
@@ -209,6 +217,7 @@ buttonsResponse = {
     { id: 'clean', label: 'Clean', icon: '🧹', command: 'rm -rf dist', workdir: '', scope: 'workspace', target: '', source: 'store', instanceKey: 'w:clean:ws-a', run: { runId: 'run-1', status: 'completed', startedAt: 1, endedAt: 2 } },
     { id: 'serve', label: 'Serve', command: 'npm run dev', workdir: '', scope: 'session', target: '', source: 'store', instanceKey: 's:serve:ses-1', run: runningSummary },
     { id: 'status', label: 'Status', command: 'git -C {workspace} status', workdir: '', scope: 'global', target: '', source: 'store', instanceKey: 'g:status', run: null },
+    { id: 'greet', label: 'Greet', icon: '', command: 'echo Hello {name} in {dir}', workdir: '', scope: 'session', target: '', source: 'store', instanceKey: 's:greet:ses-1', params: [{ name: 'name', required: true, default: '' }, { name: 'dir', required: false, default: '/tmp' }], run: null },
   ],
 }
 runPostResponse = {
@@ -373,7 +382,7 @@ await test('clicking a button starts the run and opens its popover', async () =>
 
   const posts = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run'));
   assert.equal(posts.length, 1);
-  assert.deepEqual(JSON.parse(posts[0].body), { buttonId: 'clean', sessionId: 'ses-1' });
+  assert.deepEqual(JSON.parse(posts[0].body), { buttonId: 'clean', sessionId: 'ses-1', params: {} });
 
   header = renderSlot('conversation.session.header.actions');
   const popover = findAll(header, (node) => node.props && node.props.className === 'qa-pop');
@@ -412,6 +421,81 @@ await test('the popover carries the command and an expand control', async () => 
   escape.fn({ key: 'Escape' });
   overlay = renderSlot('shell.overlay');
   assert.equal(overlay, null, 'overlay should close on Escape');
+});
+
+// ── parameters ─────────────────────────────────────────────────────────────
+
+await test('a parameterized button opens the card without running', async () => {
+  const greetButton = buttonByText(header, 'Greet');
+  assert.ok(greetButton, 'greet button missing');
+  const postsBefore = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run')).length;
+  await greetButton.props.onClick();
+  await flush();
+
+  const postsAfter = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run')).length;
+  assert.equal(postsAfter, postsBefore, 'a parameterized button must not auto-run');
+
+  header = renderSlot('conversation.session.header.actions');
+  const popover = findAll(header, (node) => node.props && node.props.className === 'qa-pop');
+  assert.equal(popover.length, 1, 'popover did not open for the parameterized button');
+  const inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  assert.equal(inputs.length, 2, 'both parameters must render an input');
+  const labels = findAll(header, (node) => node.props && node.props.className === 'qa-params-label');
+  assert.equal(labels[0].props['data-required'], 'true', 'name is required');
+});
+
+await test('filling parameters and running posts them', async () => {
+  header = renderSlot('conversation.session.header.actions');
+  const inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  assert.equal(inputs.length, 2, 'params inputs missing');
+  inputs[0].props.onChange({ target: { value: 'Ada' } });
+  inputs[1].props.onChange({ target: { value: '/opt' } });
+  header = renderSlot('conversation.session.header.actions');
+
+  const runBtn = buttonByText(header, 'Run');
+  assert.ok(runBtn, 'run button missing');
+  const postsBefore = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run')).length;
+  await runBtn.props.onClick();
+  await flush();
+
+  const postsAfter = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run'));
+  assert.equal(postsAfter.length, postsBefore + 1);
+  const body = JSON.parse(postsAfter[postsAfter.length - 1].body);
+  assert.equal(body.buttonId, 'greet');
+  assert.deepEqual(body.params, { name: 'Ada', dir: '/opt' });
+});
+
+await test('the config panel can declare a parameter', async () => {
+  const plus = buttonByText(header, '+');
+  await plus.props.onClick();
+  await flush();
+
+  let panel = renderSlot('shell.overlay');
+  // The rows state initializes from store.config in an effect; one more render
+  // pass lets that effect land and the list appear.
+  panel = renderSlot('shell.overlay');
+  const allRows = findAll(panel, (node) => node.props && node.props.className === 'qa-row');
+  const greetRow = allRows.find((r) => textOf(r).includes('Greet'));
+  if (!greetRow) {
+    const rows = findAll(panel, (node) => node.props && node.props.className === 'qa-row');
+    console.error('rows found:', rows.map((r) => textOf(r)));
+  }
+  assert.ok(greetRow, 'greet row missing in config panel');
+
+  const editBtn = findAll(greetRow, (node) => node.props && node.props.title && String(node.props.title).startsWith('Edit'))[0];
+  assert.ok(editBtn, 'edit button missing');
+  await editBtn.props.onClick();
+  panel = renderSlot('shell.overlay');
+
+  const addParam = buttonByText(panel, 'Add parameter');
+  assert.ok(addParam, 'add parameter control missing');
+  await addParam.props.onClick();
+  panel = renderSlot('shell.overlay');
+
+  const paramRows = findAll(panel, (node) => node.props && node.props.className === 'qa-paramrow');
+  assert.equal(paramRows.length, 3, 'three parameters after adding one');
+  const nameInput = findAll(paramRows[2], (node) => node.props && node.props.placeholder === 'Name')[0];
+  assert.ok(nameInput, 'parameter name input missing');
 });
 
 await test('the "+" button opens the configuration panel', async () => {
@@ -462,10 +546,11 @@ await test('a new button can be drafted and saved through the panel', async () =
   const saves = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/config'));
   assert.equal(saves.length, before + 1);
   const payload = JSON.parse(saves[saves.length - 1].body);
-  assert.equal(payload.buttons.length, 1);
-  assert.equal(payload.buttons[0].label, 'Ping');
+  assert.equal(payload.buttons.length, 2, 'greet + ping');
+  const pingRow = payload.buttons.find((b) => b.label === 'Ping');
+  assert.ok(pingRow, 'Ping row missing');
   // The empty id was derived from the label.
-  assert.equal(payload.buttons[0].id, 'ping');
+  assert.equal(pingRow.id, 'ping');
 
   // Leave the panel closed for the tests that follow.
   docListeners.find((l) => l.type === 'keydown').fn({ key: 'Escape' });

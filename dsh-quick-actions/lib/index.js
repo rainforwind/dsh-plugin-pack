@@ -34,6 +34,9 @@ const MAX_COMMAND = 4000
 const MAX_TARGET = 300
 const MAX_PATH_FIELD = 1000
 const MAX_ICON = 8
+const PARAM_NAME = /^[A-Za-z][A-Za-z0-9_]{0,31}$/
+const MAX_PARAM_VALUE = 2000
+const MAX_PARAMS = 8
 
 function defaultStorePath() {
   const profileDir = process.env.DSH_PROFILE_DIR
@@ -45,6 +48,35 @@ function toInt(value, fallback, min, max) {
   const n = Number(value)
   if (!Number.isFinite(n)) return fallback
   return Math.min(max, Math.max(min, Math.floor(n)))
+}
+
+// Parameters let a button carry run-time inputs: the "+" panel declares them
+// (name, whether required, default), the card collects a value when it opens,
+// and the run substitutes `{name}` in the command. Keeping them in the
+// definition — not the run record — keeps one instance key per scope.
+function validateParams(raw, where) {
+  if (raw === undefined || raw === null) return { value: [] }
+  if (!Array.isArray(raw)) return { error: `${where}.params: expected an array` }
+  if (raw.length > MAX_PARAMS) return { error: `${where}.params: at most ${MAX_PARAMS} parameters` }
+  const seen = new Set()
+  const params = []
+  raw.forEach((item, index) => {
+    const label = `${where}.params[${index}]`
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return // already reported by the outer check
+    }
+    const name = typeof item.name === 'string' ? item.name.trim() : ''
+    if (!PARAM_NAME.test(name)) {
+      throw new Error(`${label}.name: must match ${String(PARAM_NAME)}`)
+    }
+    if (seen.has(name)) throw new Error(`${label}.name: duplicate parameter "${name}"`)
+    seen.add(name)
+    const required = item.required !== false
+    const def = typeof item.default === 'string' ? item.default : ''
+    if (def.length > MAX_PARAM_VALUE) throw new Error(`${label}.default: at most ${MAX_PARAM_VALUE} characters`)
+    params.push({ name, required, default: def })
+  })
+  return { value: params }
 }
 
 // Validate one definition. Returns `{ value }` on success or `{ error }` with a
@@ -68,7 +100,14 @@ function validateButton(raw, where, reserved, seen) {
   if (workdir.length > MAX_PATH_FIELD) return { error: `${where}.workdir: at most ${MAX_PATH_FIELD} characters` }
   const icon = typeof raw.icon === 'string' ? raw.icon.trim() : ''
   if (icon.length > MAX_ICON) return { error: `${where}.icon: at most ${MAX_ICON} characters` }
-  return { value: { id, label, command, scope, target, workdir, icon } }
+  let params
+  try {
+    params = validateParams(raw.params, where)
+  } catch (error) {
+    return { error: error.message }
+  }
+  if (params.error) return params
+  return { value: { id, label, command, scope, target, workdir, icon, params: params.value } }
 }
 
 // Validate a whole list, keeping entry order (it is the strip's display order).
@@ -193,6 +232,38 @@ function apply(ctx, config = {}) {
       .replace(/\{session\}/g, () => context.sessionId || '{session}')
   }
 
+  // `{name}` expands to the run-time value when supplied; an unknown or empty
+  // placeholder stays literal so the omission is visible instead of silently
+  // collapsing into a different command.
+  function expandParams(command, params) {
+    const map = params || {}
+    return command.replace(/\{([A-Za-z][A-Za-z0-9_]{0,31})\}/g, (whole, name) => {
+      const value = map[name]
+      return value === undefined || value === null || value === '' ? whole : String(value)
+    })
+  }
+
+  // The card sends `{ name: value }` for the parameters it collected; the run
+  // joins only those that exist in the definition (a stale client cannot inject
+  // an arbitrary placeholder) and enforces required ones.
+  function resolveParams(button, supplied) {
+    const defs = button.params || []
+    const values = {}
+    if (supplied && typeof supplied === 'object' && !Array.isArray(supplied)) {
+      for (const def of defs) {
+        const value = supplied[def.name]
+        if (typeof value === 'string' && value.length <= MAX_PARAM_VALUE) values[def.name] = value
+      }
+    }
+    for (const def of defs) {
+      if (def.required && !(values[def.name] || def.default)) {
+        return { error: `missing-param:${def.name}` }
+      }
+      if (!values[def.name] && def.default) values[def.name] = def.default
+    }
+    return { values }
+  }
+
   // ── run registry ─────────────────────────────────────────────────────────
   let runSeq = 0
   const runs = new Map()   // instanceKey -> record; one live/latest run per instance
@@ -259,7 +330,7 @@ function apply(ctx, config = {}) {
   // Start a run for `button`'s instance, or join the one already running:
   // the shared instance is the whole point of scope, so two viewers clicking
   // the same button get the same execution and the same output.
-  async function startRun(button, context) {
+  async function startRun(button, context, suppliedParams) {
     const shell = shellService()
     if (!shell) return { error: 'shell-unavailable', status: 503 }
 
@@ -267,7 +338,10 @@ function apply(ctx, config = {}) {
     const existing = runs.get(instanceKey)
     if (existing && existing.status === 'running') return { record: existing, joined: true }
 
-    const command = expand(button.command, context)
+    const resolved = resolveParams(button, suppliedParams)
+    if (resolved.error) return { error: resolved.error, status: 400 }
+
+    const command = expandParams(expand(button.command, context), resolved.values)
     const workdir = button.workdir || config.workdir || context.workspacePath || undefined
     const record = {
       runId: `run-${String(++runSeq)}`,
@@ -282,6 +356,7 @@ function apply(ctx, config = {}) {
       signal: null,
       text: '',
       dropped: 0,
+      params: resolved.values,
       killRequested: false,
       outOff: 0,
       errOff: 0,
@@ -331,6 +406,7 @@ function apply(ctx, config = {}) {
       signal: record.signal,
       text: record.text,
       dropped: record.dropped,
+      params: record.params,
     }
   }
 
@@ -347,6 +423,7 @@ function apply(ctx, config = {}) {
       target: button.target,
       source,
       instanceKey,
+      params: (button.params || []).map((def) => ({ name: def.name, required: def.required, default: def.default })),
       run: record ? {
         runId: record.runId,
         status: record.status,
@@ -446,7 +523,7 @@ function apply(ctx, config = {}) {
         const body = await readBody(request)
         const resolved = resolveTarget(body)
         if (resolved.error) { sendJson(response, resolved.status, { ok: false, error: resolved.error }); return }
-        const started = await startRun(resolved.button, resolved.context)
+        const started = await startRun(resolved.button, resolved.context, body.params)
         if (started.error) { sendJson(response, started.status, { ok: false, error: started.error }); return }
         sendJson(response, 200, {
           ok: true,

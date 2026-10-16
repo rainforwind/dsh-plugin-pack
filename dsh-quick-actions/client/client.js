@@ -84,6 +84,17 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     'field.idHint': 'Lowercase letters, digits, - _ . — the button’s identity',
     'field.workdirHint': 'Empty = run in the workspace directory',
     'field.commandHint': 'Supports the {workspace} and {session} placeholders',
+    'params.section': 'Parameters',
+    'params.hint': 'Collected in the card when it opens; {name} in the command.',
+    'params.add': 'Add parameter',
+    'params.name': 'Name',
+    'params.required': 'Required',
+    'params.default': 'Default',
+    'params.delete': 'Remove parameter {name}',
+    'params.remove': 'Remove',
+    'pop.paramsRequired': 'This action needs parameters.',
+    'pop.runWithParams': 'Run',
+    'err.param': 'Fill in {name} before running',
     'scope.global': 'Global',
     'scope.workspace': 'Workspace',
     'scope.session': 'Session',
@@ -153,6 +164,17 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     'field.idHint': '小写字母、数字、- _ .，作为按钮的唯一标识',
     'field.workdirHint': '留空则在 workspace 目录中执行',
     'field.commandHint': '支持 {workspace} 与 {session} 占位符',
+    'params.section': '参数',
+    'params.hint': '展开卡片时填写，命令里用 {name} 引用。',
+    'params.add': '添加参数',
+    'params.name': '名称',
+    'params.required': '必填',
+    'params.default': '默认值',
+    'params.delete': '删除参数 {name}',
+    'params.remove': '删除',
+    'pop.paramsRequired': '此操作需要参数。',
+    'pop.runWithParams': '运行',
+    'err.param': '请填写 {name}',
     'scope.global': '全局',
     'scope.workspace': 'Workspace',
     'scope.session': '会话',
@@ -302,10 +324,14 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 
   // Start or join the run. Never throws: a failed start becomes a local failed
   // run record so the popover can show the reason instead of vanishing.
-  async function startRun(sessionId, buttonId, variant) {
+  async function startRun(sessionId, buttonId, variant, params) {
     const skey = ctxKey(sessionId);
     try {
-      const data = await postJson('/quick-actions/run', { buttonId, sessionId: sessionId == null ? null : sessionId });
+      const data = await postJson('/quick-actions/run', {
+        buttonId,
+        sessionId: sessionId == null ? null : sessionId,
+        params: params || {},
+      });
       setRunDetail(skey, buttonId, data.run || null);
     } catch (error) {
       setRunDetail(skey, buttonId, {
@@ -510,6 +536,13 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 .qa-iconbtn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .qa-out{margin:0;padding:10px;min-height:64px;max-height:260px;overflow:auto;background:var(--dsw-alias-bg-layer-1);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-primary);white-space:pre-wrap;word-break:break-word}
 .qa-pop-foot{display:flex;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--dsw-alias-border-l1)}
+.qa-params{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border-top:1px solid var(--dsw-alias-border-l1)}
+.qa-params-row{display:flex;align-items:center;gap:6px}
+.qa-params-label{flex:none;min-width:72px;font-size:11px;color:var(--dsw-alias-label-secondary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qa-params-label[data-required="true"]::after{content:" *";color:var(--dsw-alias-state-error-primary)}
+.qa-params-input{flex:1;min-width:0;height:24px;padding:0 8px;font-size:12px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:inherit}
+.qa-params-input[data-invalid="true"]{border-color:var(--dsw-alias-state-error-primary)}
+.qa-params-err{font-size:10px;color:var(--dsw-alias-state-error-primary)}
 .qa-cmd{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:var(--dsw-alias-label-dimmed);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .qa-act{height:24px;padding:0 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-tool-bar-fill);color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap}
 .qa-act:hover{background:var(--dsw-alias-button-tool-bar-hover)}
@@ -530,6 +563,9 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 .qa-input{width:100%;box-sizing:border-box;height:28px;padding:0 8px;font-size:12px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:inherit}
 textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.45;resize:vertical}
 .qa-fieldhint{font-size:10px;color:var(--dsw-alias-label-tertiary);line-height:1.5}
+.qa-paramrow{display:flex;align-items:center;gap:6px;padding:4px 0}
+.qa-paramrow .qa-input{height:24px}
+.qa-paramrow-check{flex:none;width:auto;height:24px;margin:0}
 .qa-row{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1);border-radius:8px;background:var(--dsw-alias-bg-layer-1)}
 .qa-row[data-readonly="true"]{opacity:.72}
 .qa-row-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
@@ -566,6 +602,8 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     const button = ((context && context.buttons) || []).find((entry) => entry.id === buttonId);
     const run = store.runs.get(runKey(skey, buttonId)) || null;
     const outputRef = React.useRef(null);
+    const [paramValues, setParamValues] = React.useState({});
+    const [paramTouched, setParamTouched] = React.useState(false);
 
     React.useEffect(() => {
       pollRun(sessionId, buttonId);
@@ -593,6 +631,14 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
 
     if (!button) return null;
     const running = !!run && run.status === 'running';
+    const defs = button.params || [];
+    const hasParams = defs.length > 0;
+    const missingRequired = defs.some((def) => def.required && !(paramValues[def.name] || def.default));
+
+    const setParam = (name, value) => {
+      setParamTouched(true);
+      setParamValues((prev) => ({ ...prev, [name]: value }));
+    };
 
     return h('div', { className: 'qa-pop', role: 'dialog', 'aria-label': t('pop.toggle') },
       h('div', { className: 'qa-pop-head' },
@@ -611,13 +657,32 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
           onClick: () => { store.popover = null; notify(); },
         }, '✕')
       ),
+      hasParams
+        ? h('div', { className: 'qa-params' },
+          defs.map((def) => h('div', { className: 'qa-params-row', key: def.name },
+            h('span', { className: 'qa-params-label', 'data-required': def.required ? 'true' : 'false' }, def.name),
+            h('input', {
+              className: 'qa-params-input',
+              type: 'text',
+              value: paramValues[def.name] !== undefined ? paramValues[def.name] : (def.default || ''),
+              placeholder: def.required ? t('err.param', { name: def.name }) : '',
+              'data-invalid': paramTouched && def.required && !(paramValues[def.name] || def.default) ? 'true' : 'false',
+              onChange: (event) => setParam(def.name, event.target.value),
+            })
+          )),
+          paramTouched && missingRequired
+            ? h('span', { className: 'qa-params-err' }, t('pop.paramsRequired'))
+            : null
+        )
+        : null,
       h(RunOutput, { run, t, outputRef }),
       h('div', { className: 'qa-pop-foot' },
         h('span', { className: 'qa-cmd', title: button.command }, button.command),
         h('button', {
           className: 'qa-act',
           'data-kind': 'primary',
-          onClick: () => startRun(sessionId, buttonId),
+          disabled: hasParams && paramTouched && missingRequired,
+          onClick: () => startRun(sessionId, buttonId, variant, paramValues),
         }, run ? t('pop.rerun') : t('pop.run')),
         running
           ? h('button', { className: 'qa-act', 'data-kind': 'danger', onClick: () => killRun(sessionId, buttonId) }, t('pop.kill'))
@@ -649,7 +714,15 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
 
     // In the collapsed rail there is no room for the popover, so a click runs
     // and jumps straight to the overlay modal, which carries its own Run/Stop.
+    // A button with declared parameters never auto-runs: the click opens the
+    // card (popover, or the modal in the rail) so the user can fill them in.
     const onCellClick = () => {
+      const hasParams = (button.params || []).length > 0;
+      if (hasParams) {
+        if (compact) expandOutput({ skey, sessionId, buttonId: button.id });
+        else { store.popover = { skey, sessionId, buttonId: button.id, variant }; notify(); }
+        return;
+      }
       startRun(sessionId, button.id, variant);
       if (compact) expandOutput({ skey, sessionId, buttonId: button.id });
     };
@@ -759,6 +832,8 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     const button = ((context && context.buttons) || []).find((entry) => entry.id === buttonId);
     const run = store.runs.get(runKey(skey, buttonId)) || null;
     const outputRef = React.useRef(null);
+    const [paramValues, setParamValues] = React.useState({});
+    const [paramTouched, setParamTouched] = React.useState(false);
 
     React.useEffect(() => {
       pollRun(sessionId, buttonId);
@@ -774,6 +849,14 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
 
     const running = !!run && run.status === 'running';
     const label = button ? button.label : buttonId;
+    const defs = (button && button.params) || [];
+    const hasParams = defs.length > 0;
+    const missingRequired = defs.some((def) => def.required && !(paramValues[def.name] || def.default));
+
+    const setParam = (name, value) => {
+      setParamTouched(true);
+      setParamValues((prev) => ({ ...prev, [name]: value }));
+    };
 
     return h('div', { className: 'qa-mask', onClick: (event) => {
       if (event.target === event.currentTarget) { store.overlay = null; notify(); }
@@ -791,6 +874,24 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
             onClick: () => { store.overlay = null; notify(); },
           }, '✕')
         ),
+        hasParams
+          ? h('div', { className: 'qa-params' },
+            defs.map((def) => h('div', { className: 'qa-params-row', key: def.name },
+              h('span', { className: 'qa-params-label', 'data-required': def.required ? 'true' : 'false' }, def.name),
+              h('input', {
+                className: 'qa-params-input',
+                type: 'text',
+                value: paramValues[def.name] !== undefined ? paramValues[def.name] : (def.default || ''),
+                placeholder: def.required ? t('err.param', { name: def.name }) : '',
+                'data-invalid': paramTouched && def.required && !(paramValues[def.name] || def.default) ? 'true' : 'false',
+                onChange: (event) => setParam(def.name, event.target.value),
+              })
+            )),
+            paramTouched && missingRequired
+              ? h('span', { className: 'qa-params-err' }, t('pop.paramsRequired'))
+              : null
+          )
+          : null,
         h('div', { className: 'qa-modal-body' },
           h(RunOutput, { run, t, outputRef })
         ),
@@ -800,7 +901,8 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
           h('button', {
             className: 'qa-act',
             'data-kind': 'primary',
-            onClick: () => startRun(sessionId, buttonId, variant),
+            disabled: hasParams && paramTouched && missingRequired,
+            onClick: () => startRun(sessionId, buttonId, undefined, paramValues),
           }, run ? t('pop.rerun') : t('pop.run')),
           running
             ? h('button', { className: 'qa-act', 'data-kind': 'danger', onClick: () => killRun(sessionId, buttonId) }, t('pop.kill'))
@@ -839,7 +941,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     return [];
   }
 
-  const blankForm = () => ({ index: -1, id: '', label: '', icon: '', command: '', workdir: '', scope: 'global', target: '' });
+  const blankForm = () => ({ index: -1, id: '', label: '', icon: '', command: '', workdir: '', scope: 'global', target: '', params: [] });
 
   function ConfigPanel({ t }) {
     useStore();
@@ -861,6 +963,13 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(candidate.id || '')) return t('err.form.id');
       if (!(candidate.label || '').trim()) return t('err.form.label');
       if (!(candidate.command || '').trim()) return t('err.form.command');
+      const seen = new Set();
+      for (const def of candidate.params || []) {
+        const name = (def.name || '').trim();
+        if (!/^[A-Za-z][A-Za-z0-9_]{0,31}$/.test(name)) return t('err.param.name');
+        if (seen.has(name)) return t('err.param.duplicate', { name });
+        seen.add(name);
+      }
       return null;
     };
 
@@ -879,6 +988,11 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
         target: form.scope === 'global' ? '' : (form.target || ''),
         workdir: (form.workdir || '').trim(),
         icon: (form.icon || '').trim(),
+        params: (form.params || []).map((def) => ({
+          name: def.name.trim(),
+          required: !!def.required,
+          default: (def.default || '').trim(),
+        })),
       };
       const next = rows ? rows.slice() : [];
       if (form.index < 0) next.push(entry);
@@ -902,6 +1016,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
         workdir: source.workdir || '',
         scope: source.scope || 'global',
         target: source.target || '',
+        params: (source.params || []).map((def) => ({ ...def })),
       });
     };
 
@@ -1009,6 +1124,66 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
                 onChange: (event) => setField('command', event.target.value),
               }),
               h('span', { className: 'qa-fieldhint' }, t('field.commandHint'))
+            ),
+            h('div', { className: 'qa-field' },
+              h('span', { className: 'qa-sectiontitle' }, t('params.section')),
+              h('span', { className: 'qa-fieldhint' }, t('params.hint')),
+              ...(form.params || []).map((def, paramIndex) => h('div', { className: 'qa-paramrow', key: paramIndex },
+                h('input', {
+                  className: 'qa-input',
+                  style: { flex: '1' },
+                  value: def.name,
+                  placeholder: t('params.name'),
+                  onChange: (event) => setForm((current) => {
+                    const next = current.params.slice();
+                    next[paramIndex] = { ...next[paramIndex], name: event.target.value };
+                    return { ...current, params: next };
+                  }),
+                }),
+                h('input', {
+                  className: 'qa-input',
+                  style: { flex: '1' },
+                  value: def.default || '',
+                  placeholder: t('params.default'),
+                  onChange: (event) => setForm((current) => {
+                    const next = current.params.slice();
+                    next[paramIndex] = { ...next[paramIndex], default: event.target.value };
+                    return { ...current, params: next };
+                  }),
+                }),
+                h('label', { className: 'qa-fieldlabel', style: { display: 'flex', alignItems: 'center', gap: '4px' } },
+                  h('input', {
+                    className: 'qa-paramrow-check',
+                    type: 'checkbox',
+                    checked: !!def.required,
+                    onChange: (event) => setForm((current) => {
+                      const next = current.params.slice();
+                      next[paramIndex] = { ...next[paramIndex], required: event.target.checked };
+                      return { ...current, params: next };
+                    }),
+                  }),
+                  t('params.required')
+                ),
+                h('button', {
+                  className: 'qa-iconbtn',
+                  title: t('params.delete', { name: def.name || String(paramIndex + 1) }),
+                  'aria-label': t('params.delete', { name: def.name || String(paramIndex + 1) }),
+                  onClick: () => setForm((current) => ({
+                    ...current,
+                    params: current.params.filter((_, position) => position !== paramIndex),
+                  })),
+                }, '✕')
+              )),
+              h('div', { className: 'qa-toolbar' },
+                h('button', {
+                  className: 'qa-act',
+                  disabled: (form.params || []).length >= 8,
+                  onClick: () => setForm((current) => ({
+                    ...current,
+                    params: [...(current.params || []), { name: '', required: false, default: '' }],
+                  })),
+                }, t('params.add'))
+              )
             ),
             h('div', { className: 'qa-field' },
               h('span', { className: 'qa-fieldlabel' }, t('field.workdir')),

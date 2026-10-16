@@ -471,6 +471,115 @@ await test('replacing the store drops runs of removed buttons', async () => {
   await flush()
 })
 
+// ── parameters ─────────────────────────────────────────────────────────────
+
+const paramButton = {
+  id: 'greet',
+  label: 'Greet',
+  command: 'echo Hello {name} in {dir}',
+  scope: 'global',
+  params: [
+    { name: 'name', required: true },
+    { name: 'dir', required: false, default: '/tmp' },
+  ],
+}
+
+await test('a required parameter missing is refused before the shell runs', async () => {
+  const shell = makeShell()
+  const { routes } = makeHost({ shell, workspaces, storePath, config: { buttons: [paramButton] } })
+
+  const missing = await call(routes, '/quick-actions/run', {
+    method: 'POST',
+    body: { buttonId: 'greet', sessionId: 'ses-a1' },
+  }).then((r) => r)
+  assert.equal(missing.status, 400)
+  assert.equal(missing.body.ok, false)
+  assert.equal(missing.body.error, 'missing-param:name')
+  assert.equal(shell.executions.length, 0, 'nothing must spawn for a missing required parameter')
+
+  const supplied = await call(routes, '/quick-actions/run', {
+    method: 'POST',
+    body: { buttonId: 'greet', sessionId: 'ses-a1', params: { name: 'Ada' } },
+  }).then((r) => r.body)
+  assert.equal(supplied.ok, true)
+  assert.equal(shell.executions[0].spec.command, 'echo Hello Ada in /tmp')
+  shell.executions[0].finish(0)
+  await flush()
+})
+
+await test('the run echoes back the parameter values it used', async () => {
+  const shell = makeShell()
+  const { routes } = makeHost({ shell, workspaces, storePath, config: { buttons: [paramButton] } })
+  const started = await call(routes, '/quick-actions/run', {
+    method: 'POST',
+    body: { buttonId: 'greet', sessionId: 'ses-a1', params: { name: 'Ada', dir: '/opt' } },
+  }).then((r) => r.body)
+  assert.equal(started.run.params.name, 'Ada')
+  assert.equal(started.run.params.dir, '/opt')
+  assert.equal(shell.executions[0].spec.command, 'echo Hello Ada in /opt')
+  shell.executions[0].finish(0)
+  await flush()
+})
+
+await test('unknown parameters are ignored and empty values stay literal', async () => {
+  const shell = makeShell()
+  const { routes } = makeHost({ shell, workspaces, storePath, config: { buttons: [paramButton] } })
+  const started = await call(routes, '/quick-actions/run', {
+    method: 'POST',
+    body: {
+      buttonId: 'greet',
+      sessionId: 'ses-a1',
+      params: { name: 'Ada', dir: '', injected: 'boom', '{x}': 'nope' },
+    },
+  }).then((r) => r.body)
+  assert.equal(started.ok, true)
+  assert.equal(started.run.params.injected, undefined, 'a name outside the definition must not join')
+  // Empty `dir` falls back to the declared default; `{session}` (a placeholder
+  // with no parameter of that name) stays literal.
+  assert.equal(shell.executions[0].spec.command, 'echo Hello Ada in /tmp')
+  shell.executions[0].finish(0)
+  await flush()
+})
+
+await test('parameter definitions round-trip through the config store', async () => {
+  const { routes } = makeHost({ shell: makeShell(), workspaces, storePath, config: { buttons: [] } })
+  const saved = await postConfig(routes, [paramButton])
+  assert.equal(saved.status, 200)
+  assert.deepEqual(saved.body.buttons[0].params, [
+    { name: 'name', required: true, default: '' },
+    { name: 'dir', required: false, default: '/tmp' },
+  ])
+
+  const listed = await listButtons(routes, 'ses-a1')
+  const view = listed.buttons.find((b) => b.id === 'greet')
+  assert.equal(view.params.length, 2)
+  assert.equal(view.params[0].name, 'name')
+  assert.equal(view.params[0].required, true)
+  assert.equal(view.params[1].default, '/tmp')
+})
+
+await test('bad parameter definitions are rejected with field errors', async () => {
+  const { routes } = makeHost({ shell: makeShell(), workspaces, storePath, config: { buttons: [] } })
+
+  const badName = await postConfig(routes, [
+    { id: 'x', label: 'x', command: 'echo', params: [{ name: '1bad', required: true }] },
+  ])
+  assert.equal(badName.status, 400)
+  assert.match(badName.body.errors[0], /buttons\[0\]\.params\[0\]\.name/)
+
+  const duplicate = await postConfig(routes, [
+    { id: 'x', label: 'x', command: 'echo', params: [{ name: 'a' }, { name: 'a' }] },
+  ])
+  assert.equal(duplicate.status, 400)
+  assert.match(duplicate.body.errors[0], /duplicate parameter/)
+
+  const notArray = await postConfig(routes, [
+    { id: 'x', label: 'x', command: 'echo', params: 'no' },
+  ])
+  assert.equal(notArray.status, 400)
+  assert.match(notArray.body.errors[0], /params: expected an array/)
+})
+
 // leave the temp store behind for OS cleanup
 rmSync(join(storePath, '..'), { recursive: true, force: true })
 
