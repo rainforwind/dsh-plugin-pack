@@ -201,6 +201,33 @@ await freshFiles(dir)
     r.ok === false && r.code === 'resident' && /session-parent-1111/.test(r.message), r.message)
 }
 
+// 12. force bypasses residency (idle held instance) — full deletion proceeds
+{
+  dir = sessionDir(root, cwd, sid)
+  await freshFiles(dir)
+  const ctx = makeCtx({ resident: true })
+  const r = await deleteArchivedSession(ctx, sid, { graceMs: 200, force: true })
+  check('force+idle: ok + forced', r.ok === true && r.forced === true, JSON.stringify(r))
+  check('force+idle: files removed', !(await exists(dir)))
+  check('force+idle: archive entry cleared', ctx.archivedIds.length === 0)
+  check('force+idle: membership detached', ctx.trace.some((t) => t[0] === 'detach'))
+}
+
+// 13. force never bypasses running work — 'live' even with force
+{
+  dir = sessionDir(root, cwd, sid)
+  await freshFiles(dir)
+  const ctx = makeCtx({ resident: true })
+  ctx.waterfall = function (name, payload) {
+    this.trace.push(['waterfall', name])
+    return Promise.resolve([{ kind: 'turn' }])
+  }
+  const r = await deleteArchivedSession(ctx, sid, { graceMs: 300, force: true })
+  check('force+running → live refusal', r.ok === false && r.code === 'live', JSON.stringify(r))
+  check('force+running: files intact', await exists(dir))
+  check('force+running: still archived', ctx.archivedIds.includes(sid))
+}
+
 await rmfs(root, { recursive: true, force: true })
 console.log(failures === 0 ? '\nALL PASS' : `\n${failures} FAILURES`)
 process.exit(failures === 0 ? 0 : 1)
