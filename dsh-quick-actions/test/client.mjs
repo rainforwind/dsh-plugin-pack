@@ -435,15 +435,20 @@ await test('the popover carries the command and an expand control', async () => 
 
 // ── parameters ─────────────────────────────────────────────────────────────
 
-await test('a parameterized button opens the card without running', async () => {
+await test('a parameterized button runs on click and opens its card', async () => {
   const greetButton = buttonByText(header, 'Greet');
   assert.ok(greetButton, 'greet button missing');
   const postsBefore = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run')).length;
   await greetButton.props.onClick();
   await flush();
 
-  const postsAfter = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run')).length;
-  assert.equal(postsAfter, postsBefore, 'a parameterized button must not auto-run');
+  // The chip click runs straight away: unset parameters are left to the host,
+  // which applies the declared defaults.
+  const posts = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run'));
+  assert.equal(posts.length, postsBefore + 1, 'a parameterized button must run on click');
+  const body = JSON.parse(posts[posts.length - 1].body);
+  assert.equal(body.buttonId, 'greet');
+  assert.deepEqual(body.params, {}, 'no typed values yet, so the host applies the defaults');
 
   header = renderSlot('conversation.session.header.actions');
   const popover = findAll(header, (node) => node.props && node.props.className === 'qa-pop');
@@ -452,6 +457,45 @@ await test('a parameterized button opens the card without running', async () => 
   assert.equal(inputs.length, 2, 'both parameters must render an input');
   const labels = findAll(header, (node) => node.props && node.props.className === 'qa-params-label');
   assert.equal(labels[0].props['data-required'], 'true', 'name is required');
+});
+
+await test('a declared default shows as a grey placeholder, not a filled value', async () => {
+  header = renderSlot('conversation.session.header.actions');
+  const inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  const dirInput = inputs[1];
+  // `dir` declares default '/tmp': it must read as a hint, so the box stays
+  // empty (placeholder) and typing is distinguishable from the suggestion.
+  assert.equal(dirInput.props.value, '', 'a default must not prefill the input');
+  assert.equal(dirInput.props.placeholder, '/tmp', 'the default must show as a placeholder');
+  assert.equal(inputs[0].props.value, '', 'the required field starts empty');
+});
+
+await test('a chip click reuses values typed in the card', async () => {
+  header = renderSlot('conversation.session.header.actions');
+  let inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  inputs[0].props.onChange({ target: { value: 'Ada' } });
+  header = renderSlot('conversation.session.header.actions');
+
+  // Close the card, then click the chip: the typed value must be reused.
+  const greetButton = buttonByText(header, 'Greet');
+  docListeners.find((l) => l.type === 'keydown').fn({ key: 'Escape' });
+  await flush();
+  header = renderSlot('conversation.session.header.actions');
+
+  const postsBefore = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run')).length;
+  await buttonByText(header, 'Greet').props.onClick();
+  await flush();
+
+  const posts = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run'));
+  assert.equal(posts.length, postsBefore + 1);
+  const body = JSON.parse(posts[posts.length - 1].body);
+  assert.equal(body.params.name, 'Ada', `the typed value was not reused: ${JSON.stringify(body.params)}`);
+
+  // Reopening the card shows the remembered value.
+  header = renderSlot('conversation.session.header.actions');
+  inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  assert.equal(inputs[0].props.value, 'Ada', 'the card did not restore the typed value');
+  void greetButton;
 });
 
 await test('filling parameters and running posts them', async () => {

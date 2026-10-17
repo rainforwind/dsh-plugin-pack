@@ -90,6 +90,7 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     'params.name': 'Name',
     'params.required': 'Required',
     'params.default': 'Default',
+    'params.defaultIs': 'Default: {value}',
     'params.delete': 'Remove parameter {name}',
     'params.remove': 'Remove',
     'pop.paramsRequired': 'This action needs parameters.',
@@ -170,6 +171,7 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     'params.name': '名称',
     'params.required': '必填',
     'params.default': '默认值',
+    'params.defaultIs': '默认值：{value}',
     'params.delete': '删除参数 {name}',
     'params.remove': '删除',
     'pop.paramsRequired': '此操作需要参数。',
@@ -241,6 +243,11 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     savedFlash: false,
     listeners: new Set(),
   };
+
+  // Parameter values the user typed in a card, kept per run instance so the
+  // next chip click reuses them instead of asking again. Absent keys mean
+  // "use the declared default", which the host applies.
+  const paramDrafts = new Map();
 
   const ctxKey = (sessionId) => (sessionId == null ? '@none' : String(sessionId));
   const runKey = (skey, buttonId) => `${skey}::${buttonId}`;
@@ -542,6 +549,7 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 .qa-params-label[data-required="true"]::after{content:" *";color:var(--dsw-alias-state-error-primary)}
 .qa-params-input{flex:1;min-width:0;height:24px;padding:0 8px;font-size:12px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-label-primary);font-family:inherit}
 .qa-params-input[data-invalid="true"]{border-color:var(--dsw-alias-state-error-primary)}
+.qa-params-input::placeholder{color:var(--dsw-alias-label-tertiary);opacity:1;font-style:italic}
 .qa-params-err{font-size:10px;color:var(--dsw-alias-state-error-primary)}
 .qa-cmd{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px;color:var(--dsw-alias-label-dimmed);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .qa-act{height:24px;padding:0 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-button-tool-bar-fill);color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap}
@@ -602,8 +610,9 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     const button = ((context && context.buttons) || []).find((entry) => entry.id === buttonId);
     const run = store.runs.get(runKey(skey, buttonId)) || null;
     const outputRef = React.useRef(null);
-    const [paramValues, setParamValues] = React.useState({});
     const [paramTouched, setParamTouched] = React.useState(false);
+    // Seed from the draft so reopening the card shows what was typed before.
+    const [paramValues, setParamValues] = React.useState(() => ({ ...(paramDrafts.get(runKey(skey, buttonId)) || {}) }));
 
     React.useEffect(() => {
       pollRun(sessionId, buttonId);
@@ -637,7 +646,12 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
 
     const setParam = (name, value) => {
       setParamTouched(true);
-      setParamValues((prev) => ({ ...prev, [name]: value }));
+      setParamValues((prev) => {
+        const next = { ...prev, [name]: value };
+        // Remember the draft so a later chip click reuses it.
+        paramDrafts.set(runKey(skey, buttonId), next);
+        return next;
+      });
     };
 
     return h('div', { className: 'qa-pop', role: 'dialog', 'aria-label': t('pop.toggle') },
@@ -664,8 +678,12 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
             h('input', {
               className: 'qa-params-input',
               type: 'text',
-              value: paramValues[def.name] !== undefined ? paramValues[def.name] : (def.default || ''),
-              placeholder: def.required ? t('err.param', { name: def.name }) : '',
+              // A declared default is a suggestion, not a filled-in value: it
+              // shows as a grey placeholder so an empty box still reads as
+              // empty, and the host applies the default when nothing is typed.
+              value: paramValues[def.name] !== undefined ? paramValues[def.name] : '',
+              placeholder: def.default || (def.required ? t('err.param', { name: def.name }) : ''),
+              title: def.default ? t('params.defaultIs', { value: def.default }) : '',
               'data-invalid': paramTouched && def.required && !(paramValues[def.name] || def.default) ? 'true' : 'false',
               onChange: (event) => setParam(def.name, event.target.value),
             })
@@ -712,15 +730,16 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       pollRun(sessionId, button.id);
     };
 
-    // In the collapsed rail there is no room for the popover, so a click runs
-    // and jumps straight to the overlay modal, which carries its own Run/Stop.
-    // A button with declared parameters never auto-runs: the click opens the
-    // card (popover, or the modal in the rail) so the user can fill them in.
+    // A click runs the button straight away: values previously typed in the
+    // card are reused, and anything left blank falls back to the declared
+    // default on the host. The card is for editing values, not a toll gate —
+    // the chevron (or the chip, once it is the only surface) opens it.
     const onCellClick = () => {
       const hasParams = (button.params || []).length > 0;
       if (hasParams) {
+        const saved = paramDrafts.get(runKey(skey, button.id)) || {};
+        startRun(sessionId, button.id, variant, saved);
         if (compact) expandOutput({ skey, sessionId, buttonId: button.id });
-        else { store.popover = { skey, sessionId, buttonId: button.id, variant }; notify(); }
         return;
       }
       startRun(sessionId, button.id, variant);
@@ -832,8 +851,9 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     const button = ((context && context.buttons) || []).find((entry) => entry.id === buttonId);
     const run = store.runs.get(runKey(skey, buttonId)) || null;
     const outputRef = React.useRef(null);
-    const [paramValues, setParamValues] = React.useState({});
     const [paramTouched, setParamTouched] = React.useState(false);
+    // Seed from the draft so reopening the modal shows what was typed before.
+    const [paramValues, setParamValues] = React.useState(() => ({ ...(paramDrafts.get(runKey(skey, buttonId)) || {}) }));
 
     React.useEffect(() => {
       pollRun(sessionId, buttonId);
@@ -855,7 +875,12 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
 
     const setParam = (name, value) => {
       setParamTouched(true);
-      setParamValues((prev) => ({ ...prev, [name]: value }));
+      setParamValues((prev) => {
+        const next = { ...prev, [name]: value };
+        // Remember the draft so a later chip click reuses it.
+        paramDrafts.set(runKey(skey, buttonId), next);
+        return next;
+      });
     };
 
     return h('div', { className: 'qa-mask', onClick: (event) => {
@@ -881,8 +906,12 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
               h('input', {
                 className: 'qa-params-input',
                 type: 'text',
-                value: paramValues[def.name] !== undefined ? paramValues[def.name] : (def.default || ''),
-                placeholder: def.required ? t('err.param', { name: def.name }) : '',
+                // A declared default is a suggestion, not a filled-in value:
+                // it shows as a grey placeholder and the host applies it when
+                // nothing is typed.
+                value: paramValues[def.name] !== undefined ? paramValues[def.name] : '',
+                placeholder: def.default || (def.required ? t('err.param', { name: def.name }) : ''),
+                title: def.default ? t('params.defaultIs', { value: def.default }) : '',
                 'data-invalid': paramTouched && def.required && !(paramValues[def.name] || def.default) ? 'true' : 'false',
                 onChange: (event) => setParam(def.name, event.target.value),
               })
