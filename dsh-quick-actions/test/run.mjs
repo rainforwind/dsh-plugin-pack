@@ -558,6 +558,36 @@ await test('parameter definitions round-trip through the config store', async ()
   assert.equal(view.params[1].default, '/tmp')
 })
 
+// A host that predates the parameter feature drops `params` on write, which is
+// exactly what a stale process looks like from the panel: declare, save,
+// reopen, gone. Guard the write path so the symptom always has a failing test.
+await test('a declared parameter is still there when the store is read back', async () => {
+  const path = join(mkdtempSync(join(tmpdir(), 'qa-tr-')), 'buttons.json')
+  const first = makeHost({ shell: makeShell(), workspaces, storePath: path, config: { buttons: [] } })
+
+  // The panel writes the definition, then reads the store back on reopen.
+  const saved = await postConfig(first.routes, [
+    { id: 'shell-run', label: 'run', command: '`{script}`', scope: 'workspace', params: [{ name: 'script', required: true }] },
+  ])
+  assert.equal(saved.status, 200)
+
+  const reopened = await getConfig(first.routes)
+  const button = reopened.buttons.find((b) => b.id === 'shell-run')
+  assert.ok(button, 'the button vanished from the store')
+  assert.ok(Array.isArray(button.params), 'params were dropped on write')
+  assert.equal(button.params.length, 1)
+  assert.equal(button.params[0].name, 'script')
+
+  // The on-disk JSON is what a restart replays, so inspect it too.
+  const onDisk = JSON.parse(readFileSync(path, 'utf8'))
+  assert.equal(onDisk.buttons[0].params[0].name, 'script', 'the parameter never reached disk')
+
+  // A fresh host reading that same file must still expose the parameter.
+  const restarted = makeHost({ shell: makeShell(), workspaces, storePath: path, config: { buttons: [] } })
+  const after = await getConfig(restarted.routes)
+  assert.equal(after.buttons[0].params[0].name, 'script', 'the parameter did not survive a restart')
+})
+
 await test('bad parameter definitions are rejected with field errors', async () => {
   const { routes } = makeHost({ shell: makeShell(), workspaces, storePath, config: { buttons: [] } })
 

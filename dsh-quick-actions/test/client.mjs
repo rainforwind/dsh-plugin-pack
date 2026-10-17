@@ -182,6 +182,9 @@ configResponse = {
 let configPostResponse = { ok: true, buttons: [], configButtons: [] }
 let runPostStatus = 200
 const fetchCalls = []
+// A stateful store so a save followed by a reopen is faithful: the config GET
+// must return what the last POST wrote, exactly as the host store does.
+let configStore = null
 
 globalThis.fetch = async (url, options) => {
   const method = (options && options.method) || 'GET';
@@ -194,7 +197,14 @@ globalThis.fetch = async (url, options) => {
   }
   if (url.includes('/quick-actions/kill')) return reply(200, { ok: true, run: null });
   if (url.includes('/quick-actions/config')) {
-    if (method === 'POST') return reply(runPostStatus === 200 ? 200 : runPostStatus, configPostResponse);
+    if (method === 'POST') {
+      const payload = options && options.body ? JSON.parse(options.body) : { buttons: [] };
+      // Mirror the host: the store keeps what was validated and written.
+      configStore = (payload.buttons || []).map((b) => ({ ...b }));
+      configPostResponse = { ok: true, buttons: configStore, configButtons: [] };
+      return reply(runPostStatus === 200 ? 200 : runPostStatus, configPostResponse);
+    }
+    if (configStore) return reply(200, { ok: true, buttons: configStore, configButtons: [], storePath: '/tmp/qa.json' });
     return reply(200, configResponse);
   }
   throw new Error(`unexpected url ${url}`);
@@ -476,10 +486,6 @@ await test('the config panel can declare a parameter', async () => {
   panel = renderSlot('shell.overlay');
   const allRows = findAll(panel, (node) => node.props && node.props.className === 'qa-row');
   const greetRow = allRows.find((r) => textOf(r).includes('Greet'));
-  if (!greetRow) {
-    const rows = findAll(panel, (node) => node.props && node.props.className === 'qa-row');
-    console.error('rows found:', rows.map((r) => textOf(r)));
-  }
   assert.ok(greetRow, 'greet row missing in config panel');
 
   const editBtn = findAll(greetRow, (node) => node.props && node.props.title && String(node.props.title).startsWith('Edit'))[0];
@@ -496,6 +502,80 @@ await test('the config panel can declare a parameter', async () => {
   assert.equal(paramRows.length, 3, 'three parameters after adding one');
   const nameInput = findAll(paramRows[2], (node) => node.props && node.props.placeholder === 'Name')[0];
   assert.ok(nameInput, 'parameter name input missing');
+});
+
+// The regression the shallow test above missed: filling the name, applying,
+// saving, and reopening must show the parameter again.
+await test('a declared parameter survives a save and reopen', async () => {
+  const panelNow = () => renderSlot('shell.overlay');
+  let panel = panelNow();
+
+  // Fill the name of the parameter row added by the previous test.
+  let paramRows = findAll(panel, (node) => node.props && node.props.className === 'qa-paramrow');
+  const nameInput = findAll(paramRows[paramRows.length - 1], (node) => node.type === 'input' && node.props.placeholder === 'Name')[0];
+  assert.ok(nameInput, 'parameter name input missing');
+  await nameInput.props.onChange({ target: { value: 'count' } });
+  panel = panelNow();
+
+  // The row must now carry what was typed.
+  paramRows = findAll(panel, (node) => node.props && node.props.className === 'qa-paramrow');
+  const typed = findAll(paramRows[paramRows.length - 1], (node) => node.type === 'input' && node.props.placeholder === 'Name')[0];
+  assert.equal(typed.props.value, 'count', 'the typed parameter name did not reach the form state');
+
+  // Apply the form back into the draft list.
+  const applyBtn = buttonByText(panel, 'Update') || buttonByText(panel, 'Add to list');
+  assert.ok(applyBtn, 'apply control missing');
+  await applyBtn.props.onClick();
+  panel = panelNow();
+
+  // Save the draft list to the host.
+  const saveBtn = buttonByText(panel, 'Save changes');
+  assert.ok(saveBtn, 'save control missing');
+  const postsBefore = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/config')).length;
+  await saveBtn.props.onClick();
+  await flush();
+
+  const saves = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/config'));
+  assert.equal(saves.length, postsBefore + 1, 'no config POST happened');
+  const posted = JSON.parse(saves[saves.length - 1].body);
+  const greet = posted.buttons.find((b) => b.id === 'greet');
+  assert.ok(greet, 'greet row missing from the saved payload');
+  assert.ok(Array.isArray(greet.params), 'params must be an array in the saved payload');
+  assert.ok(
+    greet.params.some((p) => p.name === 'count'),
+    `the new parameter was not saved: ${JSON.stringify(greet.params)}`
+  );
+  assert.ok(
+    greet.params.some((p) => p.name === 'name' && p.required === true),
+    `the existing parameters were not preserved: ${JSON.stringify(greet.params)}`
+  );
+
+  // Reopen the panel from scratch and confirm the parameter is still offered.
+  docListeners.find((l) => l.type === 'keydown').fn({ key: 'Escape' });
+  header = renderSlot('conversation.session.header.actions');
+  await buttonByText(header, '+').props.onClick();
+  await flush();
+  panel = panelNow();
+  panel = panelNow();
+
+  const rows = findAll(panel, (node) => node.props && node.props.className === 'qa-row');
+  const row = rows.find((r) => textOf(r).includes('Greet'));
+  assert.ok(row, 'greet row missing after reopen');
+  const edit = findAll(row, (node) => node.props && node.props.title && String(node.props.title).startsWith('Edit'))[0];
+  await edit.props.onClick();
+  panel = panelNow();
+
+  const reopenedRows = findAll(panel, (node) => node.props && node.props.className === 'qa-paramrow');
+  assert.equal(reopenedRows.length, 3, `expected 3 parameter rows after reopen, got ${String(reopenedRows.length)}`);
+  const names = reopenedRows.map((r) => {
+    const input = findAll(r, (node) => node.type === 'input' && node.props.placeholder === 'Name')[0];
+    return input && input.props.value;
+  });
+  assert.ok(names.includes('count'), `the saved parameter vanished on reopen: ${JSON.stringify(names)}`);
+
+  // Leave the panel closed for the tests that follow.
+  docListeners.find((l) => l.type === 'keydown').fn({ key: 'Escape' });
+  header = renderSlot('conversation.session.header.actions');
 });
 
 await test('the "+" button opens the configuration panel', async () => {
