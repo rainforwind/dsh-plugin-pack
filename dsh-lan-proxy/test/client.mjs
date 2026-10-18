@@ -55,8 +55,16 @@ const exported = descriptor.factory((id) => {
   if (id === 'react') return fakeReact
   throw new Error(`unexpected require: ${id}`)
 })
-const { CardModel, allowEntryReason, draftFromValue, equalsCurrent, opsFromDraft, parseAllowText, validateDraft } =
-  exported.__test
+const {
+  CardModel,
+  allowEntryReason,
+  draftFromValue,
+  equalsCurrent,
+  opsFromDraft,
+  parseAllowText,
+  readLanInfo,
+  validateDraft,
+} = exported.__test
 
 // ── mock config form (Host write semantics: revision-fenced, folded) ───────
 
@@ -365,6 +373,37 @@ await test('dispose detaches the form subscription', () => {
   scope.externalSet('port', 1234)
   assert.equal(model.view.dirty, false)
   assert.equal(model.view.fields.port, '3081', 'disposed model no longer follows the scope')
+})
+
+await test('readLanInfo treats a missing global as unavailable', () => {
+  delete globalThis.window.__DSH_LAN_PROXY_URLS__
+  const info = readLanInfo()
+  assert.equal(info.available, false)
+  assert.equal(info.enabled, false)
+  assert.equal(info.bound, false)
+  assert.deepEqual(info.urls, [])
+})
+
+await test('readLanInfo keeps only address/url rows and the flags', () => {
+  globalThis.window.__DSH_LAN_PROXY_URLS__ = {
+    enabled: true,
+    bound: true,
+    urls: [
+      { address: '100.64.0.1', url: 'http://100.64.0.1:3082/?token=a', family: 4 },
+      { address: '192.168.1.2' },
+      null,
+      { address: '10.0.0.1', url: 'http://10.0.0.1:3082/?token=b', family: 4 },
+    ],
+  }
+  const info = readLanInfo()
+  assert.equal(info.available, true)
+  assert.equal(info.enabled, true)
+  assert.equal(info.bound, true)
+  assert.deepEqual(
+    info.urls.map((entry) => entry.address),
+    ['100.64.0.1', '10.0.0.1'],
+  )
+  delete globalThis.window.__DSH_LAN_PROXY_URLS__
 })
 
 console.log(`\n${String(passed)} passed, ${String(failures.length)} failed`)

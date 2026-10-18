@@ -39,6 +39,10 @@ cp -r dsh-plugin-pack/dsh-lan-proxy ~/.dsh/profiles/web/node_modules/
 1. `dependencies` 中加入 `"dsh-lan-proxy": "file:./node_modules/dsh-lan-proxy"`（防被 `pnpm install` 清掉）；
 2. `dsh.profile.bundles` 数组中加入 `"dsh-lan-proxy"`（放在其他条目之后即可）。
 
+> **本地开发建议用 `link:`。** `file:./node_modules/dsh-lan-proxy` 是复制快照，之后改工作区源码不会同步到该 profile；改用
+> `dsh plugin --profile web add link:/绝对路径/dsh-plugin-pack/dsh-lan-proxy`
+> 后，profile 的 `node_modules/dsh-lan-proxy` 只是软链，重新加载/重启即读取最新源码。
+
 重启 `dsh web` 后插件挂载。**插件不预置任何默认 IP / 网段**：schema 默认 `enabled: false`；即使启用，`allow` 为空时也对外完全关闭（非回环监听 + 空白名单会拒绝启动并打印提示）。
 
 ## 配置
@@ -97,6 +101,7 @@ cp -r dsh-plugin-pack/dsh-lan-proxy ~/.dsh/profiles/web/node_modules/
 - **保存即热生效**：dsh 重启该行 fiber，本插件按新配置重新绑定监听地址与白名单，无需重启 `dsh web`。
 - **白名单校验**：逐行用与宿主一致的 IPv4 / IPv6 / CIDR 解析器校验，非法行立即标红并阻止保存；面板**不预置任何默认 IP / 网段**，名单留空仍等于对外关闭。
 - **只读提示**：dsh 的设置只在本机回环页面落盘——通过代理 / 局域网 URL 打开的页面是进程内只读（表单会提示）。请在本机浏览器里修改。
+- **带 token 的 LAN 地址**：页面底部列出当前绑定实际暴露的地址（`0.0.0.0` 会列出所有非内部 IPv4，具体地址只列自己），每个地址带一个**复制**按钮。URL 由 Host 在认证首页的 index 注入中提供，不新增未认证的状态路由；token 属于当前 Host 进程，重启后会变化，修改监听地址或端口后刷新页面即可更新。
 - 中英文文案走 dsh 的 locale 服务（`zh` / `en`），跟随界面语言切换。
 
 ## 工作原理与安全说明
@@ -115,7 +120,7 @@ node test/run.mjs      # 代理核心：白名单、重写、转发、拒绝
 node test/client.mjs   # 浏览器半：模块装载 + 面板状态机（草稿/保存/冲突）
 ```
 
-覆盖：白名单匹配（IPv4/IPv6/CIDR/映射地址/回环）、非法配置拒绝启动、暂时性绑定失败的退避与自动恢复（端口被占 → 释放后自行接上）、Host/Origin 重写与跨站不放行、HTTP 透传、SSE 流式转发、WebSocket 升级转发与拒绝、403 拦截；客户端模块在打桩的 `window.__ModuleLoader__` 下装配，覆盖行 id 表单绑定、两个插槽的注册、暂存、revision 栅栏保存、冲突提示、Discard/Reset 与白名单行校验。
+覆盖：白名单匹配（IPv4/IPv6/CIDR/映射地址/回环）、非法配置拒绝启动、暂时性绑定失败的退避与自动恢复（端口被占 → 释放后自行接上）、Host/Origin 重写与跨站不放行、HTTP 透传、SSE 流式转发、WebSocket 升级转发与拒绝、403 拦截；客户端模块在打桩的 `window.__ModuleLoader__` 下装配，覆盖行 id 表单绑定、两个插槽的注册、暂存、revision 栅栏保存、冲突提示、Discard/Reset、白名单行校验与 index 注入的 LAN URL 解析。
 
 （测试直接 import 插件源码，需要能解析 `@deepseek-ai/schemastery`；在 profile 内运行，或临时软链该包到本地 `node_modules/`。）
 

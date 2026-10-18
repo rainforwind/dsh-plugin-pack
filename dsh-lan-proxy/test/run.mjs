@@ -10,8 +10,10 @@ import z from '@deepseek-ai/schemastery'
 import {
   Config,
   addressPending,
+  advertisedAddresses,
   apply,
   assertStartable,
+  authenticatedLanUrl,
   compileAllowlist,
   currentConfig,
   matchesAllowlist,
@@ -444,6 +446,26 @@ await test('every Config field is projected into the settings section', () => {
   )
 })
 
+await test('advertisedAddresses matches the bind scope', () => {
+  assert.deepEqual(advertisedAddresses('127.0.0.1'), [])
+  assert.deepEqual(advertisedAddresses('localhost'), [])
+  assert.deepEqual(advertisedAddresses('100.64.0.1'), [{ family: 4, text: '100.64.0.1' }])
+  assert.deepEqual(advertisedAddresses('fd00::1'), [{ family: 6, text: 'fd00::1' }])
+  assert.ok(advertisedAddresses('0.0.0.0').every((entry) => entry.family === 4))
+})
+
+await test('authenticatedLanUrl brackets IPv6 and carries the token', () => {
+  const connection = { authenticatedUrl: (base) => `${base}?token=t` }
+  assert.equal(
+    authenticatedLanUrl(connection, { family: 4, text: '100.64.0.1' }, 3082),
+    'http://100.64.0.1:3082/?token=t',
+  )
+  assert.equal(
+    authenticatedLanUrl(connection, { family: 6, text: 'fd00::1' }, 3082),
+    'http://[fd00::1]:3082/?token=t',
+  )
+})
+
 // ── the listener waits instead of giving up ─────────────────────────────────
 
 await test('a busy port is waited out, not abandoned', async () => {
@@ -460,7 +482,7 @@ await test('a busy port is waited out, not abandoned', async () => {
   const ctx = {
     get: (service) => (service === 'webServer' ? { port: 1 } : undefined),
     inject: (list, callback) => {
-      callback()
+      callback({ on: () => () => {} })
       return () => {}
     },
     effect: (fn) => {

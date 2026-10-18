@@ -41,6 +41,8 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
   const ENTRY_ID = "dsh-lan-proxy";
   /** Slot item/tab id used in both registrations. */
   const ITEM_ID = "lan-proxy";
+  /** Index global the Host publishes with the authenticated LAN URLs. */
+  const LAN_URL_GLOBAL = "__DSH_LAN_PROXY_URLS__";
 
   //#region allow-entry validation (mirrors the host plugin's parser)
 
@@ -409,6 +411,14 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     targetPort: "Target port",
     targetPortHint: "0 follows the composed Web server's actual port.",
     footer: "The Host log reports proxy status with the [dsh-lan-proxy] prefix; invalid entries keep it closed.",
+    lanUrlTitle: "LAN URL with token",
+    lanUrlHint: "Open this URL on an allow-listed device. The token belongs to the current Host process and changes after a restart; reload this page after changing the listen host or port.",
+    lanUrlDisabled: "The proxy is disabled — enable it and save to produce a URL.",
+    lanUrlUnavailable: "No LAN URL yet: wait for the proxy to bind, then reload this page.",
+    copy: "Copy",
+    copied: "Copied",
+    copyFailed: "Copy failed",
+    reload: "Reload page",
     unsaved: "Unsaved",
     save: "Save",
     saving: "Saving…",
@@ -447,6 +457,14 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     targetPort: "目标端口",
     targetPortHint: "填 0 表示跟随组合中 Web 服务实际端口。",
     footer: "代理状态见 Host 日志的 [dsh-lan-proxy] 前缀；条目非法时保持关闭。",
+    lanUrlTitle: "带 token 的 LAN 地址",
+    lanUrlHint: "在白名单设备上打开这个地址。token 属于当前 Host 进程，重启后会变化；修改监听地址或端口后请刷新本页。",
+    lanUrlDisabled: "代理未启用 —— 启用并保存后才会生成地址。",
+    lanUrlUnavailable: "暂时没有可用的 LAN 地址：等待代理绑定成功后刷新本页。",
+    copy: "复制",
+    copied: "已复制",
+    copyFailed: "复制失败",
+    reload: "刷新页面",
     unsaved: "未保存",
     save: "保存",
     saving: "保存中…",
@@ -473,6 +491,51 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
   /** Fill `{name}` placeholders in a localized string. */
   function format(template, args) {
     return String(template).replace(/\{(\w+)\}/g, (whole, key) => (key in args ? String(args[key]) : whole));
+  }
+
+  /** Read the Host-published LAN URL global, tolerating a missing/malformed row. */
+  function readLanInfo() {
+    const value = typeof window === "object" ? window[LAN_URL_GLOBAL] : undefined;
+    if (!value || typeof value !== "object") {
+      return { available: false, enabled: false, bound: false, urls: [] };
+    }
+    const urls = Array.isArray(value.urls)
+      ? value.urls.filter(
+          (entry) => entry && typeof entry.url === "string" && typeof entry.address === "string",
+        )
+      : [];
+    return {
+      available: true,
+      enabled: value.enabled === true,
+      bound: value.bound === true,
+      urls,
+    };
+  }
+
+  /** Copy text through the async clipboard API, with a selection fallback. */
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // Fall through to the selection fallback.
+    }
+    try {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      const copied = document.execCommand("copy");
+      area.remove();
+      return copied;
+    } catch {
+      return false;
+    }
   }
 
   //#endregion
@@ -523,6 +586,29 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     checkboxRow: { display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" },
     footer: { display: "flex", gap: "8px", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap" },
     footerNote: { marginRight: "auto", fontSize: "11px", color: "var(--dsw-alias-label-secondary)" },
+    urlCard: {
+      display: "flex",
+      flexDirection: "column",
+      gap: "8px",
+      borderTop: "1px solid var(--dsw-alias-border-l1)",
+      paddingTop: "12px",
+    },
+    urlHead: { fontSize: "12px", fontWeight: "600" },
+    urlList: { display: "flex", flexDirection: "column", gap: "6px" },
+    urlRow: { display: "flex", alignItems: "center", gap: "8px" },
+    urlText: {
+      flex: "1",
+      minWidth: "0",
+      overflowWrap: "anywhere",
+      fontFamily: "ui-monospace, monospace",
+      fontSize: "11px",
+      background: "var(--dsw-alias-bg-base)",
+      border: "1px solid var(--dsw-alias-border-l1)",
+      borderRadius: "6px",
+      padding: "6px 8px",
+      color: "var(--dsw-alias-label-primary)",
+    },
+    urlActions: { display: "flex", justifyContent: "flex-end" },
     button: {
       font: "inherit",
       fontSize: "13px",
@@ -570,6 +656,69 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
       return format(t("errLine"), { line: String(error.line), reason: t(`reason${reason}`) });
     }
     return t(error.key === "portRange" ? "errPortRange" : "errRequired");
+  }
+
+  /**
+   * Authenticated LAN URLs published by the Host, with one copy button per
+   * address. The values come from the authenticated index document; a page
+   * loaded before the proxy bound shows the unavailable message until reload.
+   */
+  function LanUrlCard(props) {
+    const t = props.t;
+    const info = props.info;
+    const [result, setResult] = React.useState({ key: null, ok: true });
+    const timer = React.useRef(null);
+    React.useEffect(
+      () => () => {
+        if (timer.current !== null) clearTimeout(timer.current);
+      },
+      [],
+    );
+    const copy = (key, url) => {
+      void copyText(url).then((ok) => {
+        setResult({ key, ok });
+        if (timer.current !== null) clearTimeout(timer.current);
+        timer.current = setTimeout(() => setResult({ key: null, ok: true }), 1800);
+      });
+    };
+    const rows = info.urls.map((entry) =>
+      React.createElement(
+        "div",
+        { key: entry.url, style: T.urlRow },
+        React.createElement("code", { style: T.urlText, title: entry.url }, entry.url),
+        React.createElement(
+          "button",
+          {
+            type: "button",
+            style: { ...T.button, flexShrink: 0 },
+            onClick: () => copy(entry.url, entry.url),
+          },
+          result.key === entry.url ? (result.ok ? t("copied") : t("copyFailed")) : t("copy"),
+        ),
+      ),
+    );
+    return React.createElement(
+      "div",
+      { style: T.urlCard },
+      React.createElement("div", { style: T.urlHead }, t("lanUrlTitle")),
+      React.createElement("p", { style: T.hint }, t("lanUrlHint")),
+      info.urls.length === 0
+        ? React.createElement(
+            "p",
+            { style: T.warn, role: "status" },
+            info.available && !info.enabled ? t("lanUrlDisabled") : t("lanUrlUnavailable"),
+          )
+        : React.createElement("div", { style: T.urlList }, rows),
+      React.createElement(
+        "div",
+        { style: T.urlActions },
+        React.createElement(
+          "button",
+          { type: "button", style: T.button, onClick: () => window.location.reload() },
+          t("reload"),
+        ),
+      ),
+    );
   }
 
   function Card(props) {
@@ -723,6 +872,7 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
           view.saving ? t("saving") : t("save"),
         ),
       ),
+      React.createElement(LanUrlCard, { t, info: readLanInfo() }),
     );
   }
 
@@ -767,6 +917,7 @@ window.__ModuleLoader__.load({ id: "dsh-lan-proxy", factory: (require) => {
     equalsCurrent,
     opsFromDraft,
     parseAllowText,
+    readLanInfo,
     validateDraft,
   };
   return module.exports;

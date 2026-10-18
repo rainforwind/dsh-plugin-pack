@@ -49,6 +49,8 @@ const TARGET_PORT_TIMEOUT_MS = 15000
 const TARGET_PORT_POLL_MS = 100
 /** Maximum LAN URLs printed on one banner (one line each, keeps the boot log short). */
 const MAX_BANNER_URLS = 6
+/** `globalThis` property the index injection publishes for the settings page. */
+const LAN_URL_GLOBAL = '__DSH_LAN_PROXY_URLS__'
 /** First delay before retrying a bind that cannot be satisfied yet. */
 const RETRY_MIN_MS = 5000
 /** Backoff ceiling while an interface is merely absent (VPN/Tailscale up soon). */
@@ -379,6 +381,49 @@ function lanAddresses() {
   })
 }
 
+/**
+ * Order advertised addresses for the settings page: Tailscale CGNAT
+ * (`100.64.0.0/10`) first, then other IPv4, then IPv6. The token works for
+ * any reachable address, so the order is about which URL a phone should copy.
+ */
+function addressRank(entry) {
+  if (entry.family !== 4) return 2
+  return /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(entry.text) ? 0 : 1
+}
+
+/**
+ * Addresses the configured bind actually exposes to remote devices.
+ *
+ * A wildcard bind advertises the matching family from {@link lanAddresses};
+ * a concrete bind advertises only itself. Loopback and `localhost` have no
+ * remote URL, so they advertise nothing.
+ *
+ * @param host - configured listen host.
+ * @returns address entries `{ family, text }` for the settings page and log.
+ */
+function advertisedAddresses(host) {
+  const value = String(host ?? '').trim().toLowerCase()
+  if (value === '' || isLoopbackBind(value)) return []
+  if (value === '0.0.0.0') {
+    return lanAddresses()
+      .filter((entry) => entry.family === 4)
+      .sort((a, b) => addressRank(a) - addressRank(b))
+  }
+  if (value === '::' || value === '[::]') {
+    return lanAddresses().sort((a, b) => addressRank(a) - addressRank(b))
+  }
+  const text = value.startsWith('[') && value.endsWith(']') ? value.slice(1, -1) : value
+  const known = lanAddresses().find((entry) => entry.text.toLowerCase() === text)
+  if (known !== undefined) return [known]
+  return [{ family: text.includes(':') ? 6 : 4, text }]
+}
+
+/** Build the authenticated URL for one advertised address. */
+function authenticatedLanUrl(connection, address, port) {
+  const authority = address.family === 6 ? `[${address.text}]` : address.text
+  return connection.authenticatedUrl(`http://${authority}:${String(port)}/`)
+}
+
 /** Sleep used by the target-port wait; unref'd so it never holds the process open. */
 function sleep(ms) {
   return new Promise((resolve) => {
@@ -690,12 +735,29 @@ function applyPlugin(ctx, config) {
       return
     }
     active.urlsPrinted = true
-    const urls = lanAddresses().slice(0, MAX_BANNER_URLS)
+    const urls = advertisedAddresses(active.config.host).slice(0, MAX_BANNER_URLS)
     for (const address of urls) {
-      const plain = `http://${address.family === 6 ? `[${address.text}]` : address.text}:${String(active.handle.port)}/`
-      log(`LAN: ${connection.authenticatedUrl(plain)}`)
+      log(`LAN: ${authenticatedLanUrl(connection, address, active.handle.port)}`)
     }
     if (urls.length === 0) log('no non-internal addresses found for LAN URLs')
+  }
+
+  /**
+   * The authenticated URLs the settings page offers for copying. Empty until
+   * the listener is bound and the Connection service supplies the token.
+   */
+  const lanUrlEntries = () => {
+    const active = listener
+    if (active === null) return []
+    const connection = ctx.get('connection')
+    if (connection === undefined) return []
+    return advertisedAddresses(active.config.host)
+      .slice(0, MAX_BANNER_URLS)
+      .map((address) => ({
+        family: address.family,
+        address: address.text,
+        url: authenticatedLanUrl(connection, address, active.handle.port),
+      }))
   }
 
   const printBanner = (config, handle, targetPort) => {
@@ -782,6 +844,25 @@ function applyPlugin(ctx, config) {
     printLanUrls()
   })
 
+  // Publish the same authenticated URLs to the browser half through the
+  // authenticated index document, so the settings page can offer a copy
+  // button without an unauthenticated status route that would leak the token.
+  ctx.inject(['webServer', 'connection'], (webCtx) => {
+    webCtx.on('webserver/index-inject', (table) => {
+      const active = listener
+      table.push({
+        kind: 'global',
+        name: LAN_URL_GLOBAL,
+        value: {
+          enabled: current().enabled === true,
+          bound: active !== null,
+          port: active === null ? null : active.handle.port,
+          urls: lanUrlEntries(),
+        },
+      })
+    })
+  })
+
   ctx.effect(
     () => () => {
       generation++
@@ -809,12 +890,15 @@ function apply(ctx, config = {}) {
 export {
   Config,
   ENTRY_ID,
-  currentConfig,
+  LAN_URL_GLOBAL,
   addressPending,
+  advertisedAddresses,
   apply,
   assertStartable,
+  authenticatedLanUrl,
   bitsMatch,
   compileAllowlist,
+  currentConfig,
   filterResponseHeaders,
   formatAuthority,
   isLoopback,
