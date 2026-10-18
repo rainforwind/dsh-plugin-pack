@@ -34,6 +34,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'err.not-archived': 'This session is no longer archived.',
     'err.live': 'This session is still running and would not stop; try again once it settles.',
     'err.resident': 'This session is still open somewhere; close it and retry, or force the delete (running work still refuses).',
+    'err.resident.parent': 'This is a delegated child of {parent}, held in this process; the parent may be gone — force the delete, or stop the delegation first (running work still refuses).',
     'err.no-backend': 'Session storage does not support deletion here.',
     'err.no-registry': 'The workspace registry is unavailable.',
     'err.io': 'Could not remove the session files.',
@@ -58,6 +59,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'err.not-archived': '该会话已不在归档中。',
     'err.live': '该会话仍在运行且未能停止，请稍后重试。',
     'err.resident': '该会话仍被某处占用；可关闭后重试，或强制删除（运行中的会话始终拒绝）。',
+    'err.resident.parent': '该会话是 {parent} 的委托子会话，仍被进程持有；父会话可能已不存在——可强制删除，或先停止该委托（运行中的会话始终拒绝）。',
     'err.no-backend': '当前会话存储不支持删除。',
     'err.no-registry': '工作区注册表不可用。',
     'err.io': '无法删除会话文件。',
@@ -244,6 +246,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     const [deleting, setDeleting] = React.useState(false)
     const [error, setError] = React.useState(null)
     const [forceOffered, setForceOffered] = React.useState(false)
+    const [parentSession, setParentSession] = React.useState(undefined)
     const cancelRef = React.useRef(null)
     const restoreRef = React.useRef(null)
     const tFn = t || localT
@@ -252,6 +255,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
       setDeleting(false)
       setError(null)
       setForceOffered(false)
+      setParentSession(undefined)
       restoreRef.current = typeof document !== 'undefined' ? document.activeElement : null
       const focusTimer = setTimeout(() => {
         try { if (cancelRef.current) cancelRef.current.focus() } catch (error) { /* no focus */ }
@@ -289,9 +293,24 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
           setForceOffered(code === 'resident')
           if (code && Object.prototype.hasOwnProperty.call(en, 'err.' + code)) setError(tFn('err.' + code))
           else setError((reason && reason.message) || tFn('err.generic'))
+          // For a delegated child the Host's refusal names the parent session;
+          // surface it so "parent is dead, just force it" is legible. Keep the
+          // localized generic copy as the fallback if the state lookup fails.
+          if (code === 'resident') {
+            const controller = typeof AbortController === 'function' ? new AbortController() : undefined
+            getState(pending.sessionId, controller && controller.signal)
+              .then((state) => { if (state && state.parentSession) setParentSession(state.parentSession) })
+              .catch(() => { /* generic copy already shown */ })
+          }
         })
     }
     const titleId = 'sm-delete-dialog-title'
+    // Delegated child: show the parent-named refusal instead of the generic
+    // resident copy. Set only after a 'resident' refusal, so it clears on the
+    // next dialog open via the pending-effect reset.
+    const shownError = parentSession
+      ? tFn('err.resident.parent', { parent: parentSession })
+      : error
     return h('div', {
       className: 'sm-mask',
       onMouseDown: (event) => { if (event.target === event.currentTarget) close() },
@@ -309,7 +328,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
         ? tFn('confirm.desc.ghost', { title: pending.displayTitle })
         : tFn('confirm.desc', { title: pending.displayTitle }),
       deleting && h('div', { className: 'sm-status', role: 'status' }, tFn('pending')),
-      error && h('div', { className: 'sm-error', role: 'alert' }, error)),
+      shownError && h('div', { className: 'sm-error', role: 'alert' }, shownError)),
     h('div', { className: 'sm-dialog-foot' },
       h('button', {
         type: 'button', className: 'sm-btn', disabled: deleting, ref: cancelRef, onClick: close,
