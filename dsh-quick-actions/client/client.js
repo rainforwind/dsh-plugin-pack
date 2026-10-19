@@ -25,7 +25,10 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
   // `timer` is a hard dependency: the restricted client context only lets the
   // timer helpers through when the fiber declares them, and apply() reads
   // ctx.interval for the 3s poll (and every popover poll reuses it).
-  const inject = ['slots', 'timer'];
+  // `locale` is declared too: without it ctx.get('locale') hands back nothing,
+  // the dictionaries never reach the registry, and the slot's translator falls
+  // back to echoing raw keys ("pop.rerun") into the UI.
+  const inject = ['slots', 'timer', 'locale'];
 
   // ── locale ───────────────────────────────────────────────────────────────
 
@@ -191,16 +194,16 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     'err.form.command': '命令必填',
   };
 
+  function substitute(text, params) {
+    if (!params) return text;
+    for (const name of Object.keys(params)) {
+      text = text.split(`{${name}}`).join(String(params[name]));
+    }
+    return text;
+  }
+
   function makeT(dict) {
-    return (key, params) => {
-      let text = dict[key] != null ? dict[key] : (en[key] != null ? en[key] : key);
-      if (params) {
-        for (const name of Object.keys(params)) {
-          text = text.split(`{${name}}`).join(String(params[name]));
-        }
-      }
-      return text;
-    };
+    return (key, params) => substitute(dict[key] != null ? dict[key] : (en[key] != null ? en[key] : key), params);
   }
 
   function preferredDict() {
@@ -210,8 +213,39 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     return en;
   }
 
-  // Fallback when the locale service does not hand the component a `t`.
-  const localT = makeT(preferredDict());
+  // Fallback when the locale service does not hand the component a `t`, and the
+  // safety net when it does hand one that cannot resolve our namespace.
+  const fallbackT = makeT(preferredDict());
+
+  // Set by apply() once the locale service's bound translator is available: it
+  // follows the app's language preference, which navigator.language cannot.
+  let boundT = null;
+
+  // Resolve a key through the host first, then our own dictionary. A namespace
+  // that never reached the registry resolves every key to itself, so "same
+  // string back" counts as a miss — a raw `pop.rerun` must never reach the UI.
+  function resolveText(key, params) {
+    let text;
+    if (boundT) {
+      try { text = boundT(key, params); } catch (error) { text = undefined; }
+    }
+    if (text == null || text === '' || text === key) return fallbackT(key, params);
+    return String(text);
+  }
+
+  const localT = (key, params) => resolveText(key, params);
+
+  // The slot's `locale: NS` makes the host pass a translator bound to this
+  // namespace; it can still be an unbound/empty one, so keep the same safety net.
+  function composeT(tProp) {
+    if (typeof tProp !== 'function') return localT;
+    return (key, params) => {
+      let text;
+      try { text = tProp(key, params); } catch (error) { text = undefined; }
+      if (text == null || text === '' || text === key) return localT(key, params);
+      return String(text);
+    };
+  }
 
   function api(path) {
     const relative = path.replace(/^\/+/, '');
@@ -773,7 +807,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
 
   function Strip({ sessionId, variant, wide, t: tProp }) {
     useStore();
-    const t = tProp || localT;
+    const t = composeT(tProp);
     const sid = variant === 'sidebar' ? mainSessionId() : sessionId;
     const skey = ctxKey(sid);
     // The sidebar hands its slots `wide: false` while collapsed: the footer
@@ -1299,7 +1333,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
 
   function Overlay({ t: tProp }) {
     useStore();
-    const t = tProp || localT;
+    const t = composeT(tProp);
     const overlay = store.overlay;
     if (!overlay) return null;
     if (overlay.kind === 'output') {
@@ -1326,11 +1360,18 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     services.workspaces = ctx.get('workspaces') || null;
 
     // Route static strings through the host locale when it exists; components
-    // fall back to `localT` otherwise.
-    const locale = ctx.get('locale');
+    // fall back to `localT` otherwise. `locale` is in `inject`, so the service
+    // face is on ctx — `get` is only kept as a tolerant second path.
+    const locale = ctx.locale || ctx.get('locale');
     if (locale && typeof locale.register === 'function') {
       try {
         ctx.effect(() => locale.register(NS, { zh, en }), 'quick-actions: dictionaries');
+        if (typeof locale.bind === 'function') {
+          // A bound translator resolves the active app language (and switches
+          // with it), which navigator.language cannot follow.
+          const bound = locale.bind(NS);
+          if (typeof bound === 'function') boundT = bound;
+        }
       } catch (error) { console.log('[quick-actions] locale registration failed:', String(error)); }
     }
 

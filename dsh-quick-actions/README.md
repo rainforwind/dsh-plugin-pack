@@ -73,7 +73,8 @@ JSON store 默认路径：`$DSH_PROFILE_DIR/dsh-quick-actions.json`，未设置�
 - **workspace**：`ctx.get('workspaceRegistry').list()` 返回实体，用 `entity.sessionIds` 反查会话所属 workspace，取 `entity.id` / `entity.path`。服务缺席时会话视为未分组（workspace 相关 target 不命中，无 target 的照常可见）。
 - **shell**：`ctx.shell.resolve(request)` → `ctx.shell.execute(spec)`，读输出走 `exec.observed[channel].readFrom(offset)`（`{ text, nextOffset, lossy }`），`exec.done` 只 resolve 不 reject。
 - **客户端服务**：`slots` / `sessions` / `workspaces`（配置面板的 workspace 下拉：`workspaces.list.getSnapshot().items`）/ `locale`（`ctx.locale.register(NS, { zh, en })`，缺席时回退到按 `navigator.language` 选的内置词典）。全部可选，缺席即降级。
-- **timer（硬依赖）**：客户端半区跑在受限 context 上，`ctx.interval` 只对声明了 `inject: ['slots', 'timer']` 的 fiber 放行——未声明就调用是同步抛错，会让整个页面启动失败（`web boot: N entries did not activate / dsh-quick-actions: failed`）。3s 上下文轮询与 popover 的 700ms 轮询都走 `ctx.interval`，所以 `timer` 必须留在 inject 里，不能当可选项。
+- **timer（硬依赖）**：客户端半区跑在受限 context 上，`ctx.interval` 只对声明了 `inject: ['slots', 'timer', 'locale']` 的 fiber 放行——未声明就调用是同步抛错，会让整个页面启动失败（`web boot: N entries did not activate / dsh-quick-actions: failed`）。3s 上下文轮询与 popover 的 700ms 轮询都走 `ctx.interval`，所以 `timer` 必须留在 inject 里，不能当可选项。
+- **locale（同等重要）**：受限 context 上 `ctx.get('locale')` 只对声明过的服务返回东西。`locale` 不在 `inject` 里时字典注册静默不执行，槽位规范里的 `locale: NS` 仍会让宿主传一个 `t`，但它解析不了我们的命名空间、把 key 原样吐回来——界面就会出现 `pop.rerun`、`status.exit0` 这种字面量。所以 `locale` 必须在 `inject` 里，并且组件侧再兜一层：宿主 `t` 返回的字符串等于 key 时改用本地词典，任何情况下都不让原始 key 上屏。
 
 ## 安装
 
@@ -106,7 +107,7 @@ node test/run.mjs      # Host 半：scope 可见性/实例共享、执行生命�
 node test/client.mjs   # 浏览器半：槽位注册、按钮拉取、运行与 popover 输出、放大面板、「+」配置面板增删保存、失败提示、Esc
 ```
 
-覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；参数：必填缺失在 shell 启动前拒绝（400 `missing-param:<name>`）、值替换与回显、未知参数键丢弃、定义经 config 落盘往返、非法/重名参数的字段级报错；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换；参数：带参按钮点芯片只开卡片不运行、卡片填值后 POST 携带 `params`、管理面板可声明参数行。
+覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；参数：必填缺失在 shell 启动前拒绝（400 `missing-param:<name>`）、值替换与回显、未知参数键丢弃、定义经 config 落盘往返、非法/重名参数的字段级报错；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换；参数：带参按钮点芯片即运行并复用卡片里填过的值、默认值以 placeholder 呈现、卡片填值后 POST 携带 `params`、管理面板可声明参数行、保存后重开参数仍在；以及宿主 `t` 解析不了命名空间时界面不漏出原始 locale key。
 
 ## 卸载
 

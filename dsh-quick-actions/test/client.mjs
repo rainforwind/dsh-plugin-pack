@@ -433,6 +433,43 @@ await test('the popover carries the command and an expand control', async () => 
   assert.equal(overlay, null, 'overlay should close on Escape');
 });
 
+// The slot's `locale: NS` makes the host pass a translator. When the namespace
+// never reached the registry that translator echoes the key back, and every
+// label in the popover turns into `pop.rerun` / `status.exit0` — the bug this
+// test pins: a raw key must never reach the UI.
+await test('an unbound host translator never leaks raw locale keys', async () => {
+  const original = slotProps['conversation.session.header.actions'];
+  slotProps['conversation.session.header.actions'] = { sessionId: 'ses-1', t: (key) => key };
+
+  try {
+    header = renderSlot('conversation.session.header.actions');
+    // Open the card of the completed button through its chevron.
+    const chevron = findAll(header, (node) => node.props && node.props.className === 'qa-chev')[0];
+    assert.ok(chevron, 'chevron missing');
+    await chevron.props.onClick();
+    await flush();
+
+    header = renderSlot('conversation.session.header.actions');
+    const text = textOf(header);
+    assert.ok(text.includes('Run again'), `Run again missing; rendered: ${JSON.stringify(text)}`);
+    // Whichever lifecycle this fixture is in, the label must be resolved copy.
+    assert.ok(
+      text.includes('Running…') || text.includes('Exit 0') || text.includes('Stopped'),
+      `status text did not resolve; rendered: ${JSON.stringify(text.slice(-300))}`
+    );
+    assert.ok(!/status\.[a-z0-9]+/.test(text), 'a raw status.* key leaked into the UI');
+    assert.ok(!text.includes('pop.rerun'), 'the key pop.rerun leaked into the UI');
+
+    // Close it again so the following tests start from a clean strip.
+    findAll(header, (node) => node.props && node.props.className === 'qa-chev')[0].props.onClick();
+    await flush();
+    header = renderSlot('conversation.session.header.actions');
+  } finally {
+    slotProps['conversation.session.header.actions'] = original;
+    header = renderSlot('conversation.session.header.actions');
+  }
+});
+
 // ── parameters ─────────────────────────────────────────────────────────────
 
 await test('a parameterized button runs on click and opens its card', async () => {
