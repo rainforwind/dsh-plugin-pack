@@ -329,6 +329,31 @@ function rewriteRequestHeaders(headers, info, keepHopByHop) {
   return out
 }
 
+/**
+ * Relax `SameSite=Strict` to `SameSite=Lax` on a Set-Cookie value.
+ *
+ * dsh mints its session cookie with `SameSite=Strict`, which is right for a
+ * loopback page: every navigation there is same-site. Through this proxy it
+ * breaks the one flow the feature exists for. A QR code or a link is opened by
+ * *another* app, so the browser treats that top-level navigation as cross-site
+ * and withholds the Strict cookie — the request arrives with no credential and
+ * dsh answers 401, even though the cookie is stored and valid (the subresource
+ * requests a moment later do carry it).
+ *
+ * Lax keeps that credential for top-level GET navigations, which is exactly the
+ * case here, and still withholds it from cross-site subresources and POSTs. It
+ * is also the browser default that Strict opted out of. Access control is
+ * unaffected: the source-IP allowlist decides who reaches the proxy at all, and
+ * this only changes whether a request that already got through carries its own
+ * cookie.
+ */
+function relaxCookieSameSite(value) {
+  if (typeof value !== 'string') return value
+  // Only the exact Strict token is rewritten; `SameSite=None` already sends on
+  // every request, and a bare attribute keeps its default (Lax).
+  return value.replace(/;\s*SameSite\s*=\s*Strict\b/gi, '; SameSite=Lax')
+}
+
 /** Strip hop-by-hop headers (and anything the Connection header names) from a response. */
 function filterResponseHeaders(headers) {
   const drop = new Set([...HOP_BY_HOP, ...connectionTokens(headers)])
@@ -336,6 +361,10 @@ function filterResponseHeaders(headers) {
   for (const [key, value] of Object.entries(headers)) {
     const lower = key.toLowerCase()
     if (drop.has(lower)) continue
+    if (lower === 'set-cookie') {
+      out[lower] = Array.isArray(value) ? value.map(relaxCookieSameSite) : relaxCookieSameSite(value)
+      continue
+    }
     out[lower] = value
   }
   return out

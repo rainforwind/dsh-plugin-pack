@@ -16,6 +16,7 @@ import {
   authenticatedLanUrl,
   compileAllowlist,
   currentConfig,
+  filterResponseHeaders,
   matchesAllowlist,
   nextRetryDelay,
   normalizeIp,
@@ -147,6 +148,72 @@ await test('request header rewrite: Host/Origin to loopback, cross-origin untouc
   const upgrade = rewriteRequestHeaders({ host: '100.64.0.5:3081', connection: 'Upgrade', upgrade: 'websocket' }, info, true)
   assert.equal(upgrade.connection, 'Upgrade')
   assert.equal(upgrade.upgrade, 'websocket')
+})
+
+await test('session cookies are relaxed from SameSite=Strict to Lax', () => {
+  // dsh mints its cookie with SameSite=Strict. A QR code or a chat link opens
+  // the page from ANOTHER app, so the browser calls that top-level navigation
+  // cross-site and withholds a Strict cookie. The phone then arrives with no
+  // credential and gets 401 even though the cookie is stored and valid — the
+  // subresource requests a moment later do carry it. Lax keeps the credential
+  // for top-level GET navigations, which is the whole flow, while still
+  // withholding it from cross-site subresources and POSTs.
+  const setCookie =
+    'dsh-auth-abc123=v1.payload.signature; Max-Age=2592000; Path=/; Expires=Wed, 18 Nov 2026 08:01:17 GMT; HttpOnly; SameSite=Strict'
+  const out = filterResponseHeaders({ 'set-cookie': setCookie })
+  assert.match(out['set-cookie'], /SameSite=Lax/, 'the session cookie is reachable from a cross-app navigation')
+  assert.doesNotMatch(out['set-cookie'], /SameSite=Strict/, 'the strict token is gone')
+  // Everything else on the cookie is preserved verbatim.
+  for (const attribute of ['dsh-auth-abc123=v1.payload.signature', 'Max-Age=2592000', 'Path=/', 'HttpOnly']) {
+    assert.ok(out['set-cookie'].includes(attribute), `${attribute} survives the rewrite`)
+  }
+})
+
+await test('multiple Set-Cookie headers are each relaxed, and non-Strict ones are untouched', () => {
+  // Node reports repeated Set-Cookie as an array; every value needs the rewrite.
+  const out = filterResponseHeaders({
+    'set-cookie': [
+      'a=1; Path=/; SameSite=Strict',
+      'b=2; Path=/; SameSite=Lax',
+      'c=3; Path=/; SameSite=None; Secure',
+      'd=4; Path=/',
+    ],
+  })
+  assert.deepEqual(out['set-cookie'], [
+    'a=1; Path=/; SameSite=Lax',
+    'b=2; Path=/; SameSite=Lax',
+    'c=3; Path=/; SameSite=None; Secure',
+    'd=4; Path=/',
+  ])
+})
+
+await test('the SameSite rewrite ignores case and spacing but not lookalikes', () => {
+  const out = filterResponseHeaders({
+    'set-cookie': [
+      'a=1; samesite=strict',
+      'b=2;SameSite=Strict',
+      'c=3; SameSite=Stricter',
+      'd=4; SameSite=STRICTLY',
+    ],
+  })
+  assert.equal(out['set-cookie'][0], 'a=1; SameSite=Lax', 'header case does not matter')
+  assert.equal(out['set-cookie'][1], 'b=2; SameSite=Lax', 'a missing space still matches')
+  // A longer token must not be partially rewritten into an invalid attribute.
+  assert.equal(out['set-cookie'][2], 'c=3; SameSite=Stricter')
+  assert.equal(out['set-cookie'][3], 'd=4; SameSite=STRICTLY')
+})
+
+await test('other response headers pass through the same filter unchanged', () => {
+  const out = filterResponseHeaders({
+    'content-type': 'text/html; charset=utf-8',
+    connection: 'keep-alive',
+    'keep-alive': 'timeout=5',
+    'x-custom': 'kept',
+  })
+  assert.equal(out['content-type'], 'text/html; charset=utf-8')
+  assert.equal(out['x-custom'], 'kept')
+  assert.equal(out.connection, undefined, 'hop-by-hop still dropped')
+  assert.equal(out['keep-alive'], undefined, 'hop-by-hop still dropped')
 })
 
 await test('composition schema defaults and bounds', () => {
