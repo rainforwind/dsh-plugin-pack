@@ -186,6 +186,27 @@ function apply(ctx, config = {}) {
   // ── scope: context, visibility, instance identity ────────────────────────
   // The client sends only the session on screen; the workspace that session
   // belongs to is resolved here so both layers of scope come from one place.
+  // The registry's `sessionIds` getter is filtered by the durable header index,
+  // so a session created moments ago is in no list yet. Falling back to the
+  // session's own working directory keeps {workspace} and the default workdir
+  // correct during that window instead of running the command in the wrong
+  // directory (a fresh session used to report "not a git repository").
+  function sessionDirectory(sessionId) {
+    const working = ctx.get('workingDirectory')
+    if (working && typeof working.get === 'function') {
+      try {
+        const agents = ctx.get('agents')
+        const agent = agents && typeof agents.get === 'function' ? agents.get(sessionId) : undefined
+        const session = agent && agent.session
+        if (session) {
+          const dir = working.get(session)
+          if (typeof dir === 'string' && dir) return dir
+        }
+      } catch (error) { /* no live agent for this session yet */ }
+    }
+    return ''
+  }
+
   function workspaceOf(sessionId) {
     if (!sessionId) return { id: '', path: '' }
     const registry = ctx.get('workspaceRegistry')
@@ -195,6 +216,19 @@ function apply(ctx, config = {}) {
       for (const workspace of list) {
         const ids = workspace.sessionIds || []
         if (ids.indexOf(sessionId) >= 0) return { id: String(workspace.id || ''), path: String(workspace.path || '') }
+      }
+      // Not indexed yet: match the workspace whose directory is this session's
+      // working directory, so the instance key and the command agree.
+      const dir = sessionDirectory(sessionId)
+      if (dir) {
+        for (const workspace of list) {
+          const path = String(workspace.path || '')
+          if (path && (path === dir || dir.startsWith(`${path}/`))) {
+            return { id: String(workspace.id || ''), path }
+          }
+        }
+        // A directory outside every workspace is still a real working directory.
+        return { id: '', path: dir }
       }
     } catch (error) { /* registry unavailable: treat the session as ungrouped */ }
     return { id: '', path: '' }
@@ -220,7 +254,13 @@ function apply(ctx, config = {}) {
 
   function instanceKeyOf(button, context) {
     if (button.scope === 'global') return `g:${button.id}`
-    if (button.scope === 'workspace') return `w:${button.id}:${context.workspaceId || ''}`
+    // A workspace-scoped button shares one instance per workspace — but only
+    // when the session really belongs to one. Without a workspace id every
+    // ungrouped session would share `w:<id>:`, so two unrelated sessions would
+    // see each other's run; fall back to the session id instead.
+    if (button.scope === 'workspace') {
+      return context.workspaceId ? `w:${button.id}:${context.workspaceId}` : `w:${button.id}:~${context.sessionId || ''}`
+    }
     return `s:${button.id}:${context.sessionId}`
   }
 

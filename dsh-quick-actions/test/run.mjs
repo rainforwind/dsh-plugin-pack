@@ -67,7 +67,7 @@ function makeShell() {
 }
 
 // workspaces: [{ id, path, sessionIds }] rows for the registry stub.
-function makeHost({ shell, workspaces = [], storePath, config = {} } = {}) {
+function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs = {} } = {}) {
   const routes = new Map()
   const webServer = {
     register(route) {
@@ -77,12 +77,19 @@ function makeHost({ shell, workspaces = [], storePath, config = {} } = {}) {
     },
   }
   const registry = { list: () => workspaces }
+  // `workingDirectory.get(session)` / `agents.get(id)` as the Host serves them:
+  // a session created moments ago is in no workspace's `sessionIds` yet, but
+  // its own working directory is already known.
+  const workingDirectory = { get: (session) => sessionDirs[session && session.id] || '/fallback' }
+  const agents = { get: (id) => (sessionDirs[id] ? { session: { id } } : undefined) }
   const disposers = []
   const ctx = {
     get(service) {
       if (service === 'webServer') return webServer
       if (service === 'shell') return shell
       if (service === 'workspaceRegistry') return registry
+      if (service === 'workingDirectory') return workingDirectory
+      if (service === 'agents') return agents
       return undefined
     },
     on() {},
@@ -608,6 +615,63 @@ await test('bad parameter definitions are rejected with field errors', async () 
   ])
   assert.equal(notArray.status, 400)
   assert.match(notArray.body.errors[0], /params: expected an array/)
+})
+
+// ── a session created moments ago ──────────────────────────────────────────
+
+// The registry's `sessionIds` is filtered by the durable header index, so a
+// brand-new session belongs to no list yet. Resolving it to an empty workspace
+// used to run the command in the wrong directory ("not a git repository") and
+// to collide every such session onto one instance key.
+await test('a session not yet indexed still resolves its workspace directory', async () => {
+  const shell = makeShell()
+  const path = join(mkdtempSync(join(tmpdir(), 'qa-new-')), 'buttons.json')
+  const { routes } = makeHost({
+    shell,
+    workspaces,
+    storePath: path,
+    config: {
+      buttons: [{ id: 'status', label: 'Git', command: 'git -C {workspace} status -sb', scope: 'workspace' }],
+    },
+    // ses-fresh is absent from every workspace.sessionIds above.
+    sessionDirs: { 'ses-fresh': '/proj/a/sub' },
+  })
+
+  const listed = await listButtons(routes, 'ses-fresh')
+  assert.equal(listed.workspaceId, 'ws-a', 'the workspace must be found from the session directory')
+  const button = listed.buttons.find((b) => b.id === 'status')
+  assert.equal(button.instanceKey, 'w:status:ws-a', 'the instance key must follow the resolved workspace')
+
+  const started = await startRun(routes, 'status', 'ses-fresh')
+  assert.equal(started.ok, true)
+  assert.equal(shell.executions[0].spec.command, 'git -C /proj/a status -sb', '{workspace} must expand')
+  assert.equal(started.run.workdir, '/proj/a', 'the default workdir must be the resolved directory')
+  shell.executions[0].finish(0)
+  await flush()
+})
+
+await test('two ungrouped sessions never share a workspace-scoped instance', async () => {
+  const shell = makeShell()
+  const path = join(mkdtempSync(join(tmpdir(), 'qa-iso-')), 'buttons.json')
+  const { routes } = makeHost({
+    shell,
+    workspaces,
+    storePath: path,
+    config: {
+      buttons: [{ id: 'status', label: 'Git', command: 'echo {workspace}', scope: 'workspace' }],
+    },
+    // Neither session is indexed and neither resolves to a workspace.
+    sessionDirs: {},
+  })
+
+  await startRun(routes, 'status', 'ses-loose-1')
+  const first = (await readRun(routes, 'status', 'ses-loose-1')).run
+  const otherSession = await readRun(routes, 'status', 'ses-loose-2')
+  assert.equal(first.status, 'running')
+  assert.equal(otherSession.run, null, 'another ungrouped session must not see this run')
+
+  shell.executions[0].finish(0)
+  await flush()
 })
 
 // leave the temp store behind for OS cleanup

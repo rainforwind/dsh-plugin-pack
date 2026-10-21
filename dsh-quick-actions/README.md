@@ -70,7 +70,8 @@ JSON store 默认路径：`$DSH_PROFILE_DIR/dsh-quick-actions.json`，未设置�
 
 - **槽位**：`ctx.slots.inject(key, () => ctx.slots.register(spec, Component))`，注册进 `conversation.session.header.actions`（session 作用域，组件收 `sessionId` prop）、`sidebar.footer.action`（root 作用域，自己从 `sessions.list.getSnapshot()` 里取 `retainedBy.mainView > 0` 的行）与 `shell.overlay`。三个注入各自 try/catch：某个槽位缺席只失去对应界面，不拖垮插件。
 - **路由**：`webServer.register({ kind: 'exact', path, handler })`，且 (kind, path) **重复注册会抛错**——所以 `GET/POST /quick-actions/run` 与 `GET/POST /quick-actions/config` 各自在一个 handler 里按 `request.method` 分发，而不是注册两次。
-- **workspace**：`ctx.get('workspaceRegistry').list()` 返回实体，用 `entity.sessionIds` 反查会话所属 workspace，取 `entity.id` / `entity.path`。服务缺席时会话视为未分组（workspace 相关 target 不命中，无 target 的照常可见）。
+- **workspace**：`ctx.get('workspaceRegistry').list()` 返回实体，用 `entity.sessionIds` 反查会话所属 workspace，取 `entity.id` / `entity.path`。这个 getter **已被持久化的 header 索引过滤**，所以刚建的会话还不在任何列表里——此时退回 `workingDirectory.get(agent.session)` 拿它自己的目录，再按目录前缀匹配 workspace；仍匹配不上就把该目录当作 `{workspace}`，保证命令跑在对的地方（否则新建会话会得到 `fatal: not a git repository`）。未分组会话的实例键带上会话 id（`w:<id>:~<sessionId>`），避免多个无 workspace 的会话共用一次运行。服务缺席时会话视为未分组（workspace 相关 target 不命中，无 target 的照常可见）。
+- **agents**：`ctx.get('agents').get(sessionId)` 取活着的 agent，用于把 id 换成 `workingDirectory.get()` 需要的 session 对象；没有活 agent 时跳过这层兜底。
 - **shell**：`ctx.shell.resolve(request)` → `ctx.shell.execute(spec)`，读输出走 `exec.observed[channel].readFrom(offset)`（`{ text, nextOffset, lossy }`），`exec.done` 只 resolve 不 reject。
 - **客户端服务**：`slots` / `sessions` / `workspaces`（配置面板的 workspace 下拉：`workspaces.list.getSnapshot().items`）/ `locale`（`ctx.locale.register(NS, { zh, en })`，缺席时回退到按 `navigator.language` 选的内置词典）。全部可选，缺席即降级。
 - **timer（硬依赖）**：客户端半区跑在受限 context 上，`ctx.interval` 只对声明了 `inject: ['slots', 'timer', 'locale']` 的 fiber 放行——未声明就调用是同步抛错，会让整个页面启动失败（`web boot: N entries did not activate / dsh-quick-actions: failed`）。3s 上下文轮询与 popover 的 700ms 轮询都走 `ctx.interval`，所以 `timer` 必须留在 inject 里，不能当可选项。
@@ -107,7 +108,7 @@ node test/run.mjs      # Host 半：scope 可见性/实例共享、执行生命�
 node test/client.mjs   # 浏览器半：槽位注册、按钮拉取、运行与 popover 输出、放大面板、「+」配置面板增删保存、失败提示、Esc
 ```
 
-覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；参数：必填缺失在 shell 启动前拒绝（400 `missing-param:<name>`）、值替换与回显、未知参数键丢弃、定义经 config 落盘往返、非法/重名参数的字段级报错；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换；参数：带参按钮点芯片即运行并复用卡片里填过的值、默认值以 placeholder 呈现、卡片填值后 POST 携带 `params`、管理面板可声明参数行、保存后重开参数仍在；以及宿主 `t` 解析不了命名空间时界面不漏出原始 locale key。
+覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；参数：必填缺失在 shell 启动前拒绝（400 `missing-param:<name>`）、值替换与回显、未知参数键丢弃、定义经 config 落盘往返、非法/重名参数的字段级报错；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换；参数：带参按钮点芯片即运行并复用卡片里填过的值、默认值以 placeholder 呈现、卡片填值后 POST 携带 `params`、管理面板可声明参数行、保存后重开参数仍在；以及新建会话（尚未进 header 索引）按自身目录解析 workspace、未分组会话实例不互相串味；宿主 `t` 解析不了命名空间时界面不漏出原始 locale key。
 
 ## 卸载
 
