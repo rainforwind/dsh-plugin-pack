@@ -211,6 +211,18 @@ await freshFiles(dir)
   check('force+idle: files removed', !(await exists(dir)))
   check('force+idle: archive entry cleared', ctx.archivedIds.length === 0)
   check('force+idle: membership detached', ctx.trace.some((t) => t[0] === 'detach'))
+  // The Client picks its result notice from this flag, so the plain-delete
+  // result must say forced:false rather than omitting it.
+  check('force+idle: forced is a boolean', typeof r.forced === 'boolean')
+}
+
+// 12b. unforced delete reports forced:false (the dialog then shows the plain copy)
+{
+  dir = sessionDir(root, cwd, sid)
+  await freshFiles(dir)
+  const ctx = makeCtx()
+  const r = await deleteArchivedSession(ctx, sid, { graceMs: 100 })
+  check('plain delete: ok + forced:false', r.ok === true && r.forced === false, JSON.stringify(r))
 }
 
 // 13. force never bypasses running work — 'live' even with force

@@ -43,6 +43,11 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'err.http': 'Request failed ({code}).',
     'err.network': 'Cannot reach the host.',
     'err.generic': 'Delete failed.',
+    'toast.deleted.title': 'Session deleted',
+    'toast.deleted.body': '“{title}” and its session log were permanently removed.',
+    'toast.forced.title': 'Force-deleted',
+    'toast.forced.body': '“{title}” was removed. Its in-memory instance stays in this process until the Harness restarts; it is detached from the lists meanwhile.',
+    'toast.dismiss': 'Dismiss',
   }
 
   const zh = {
@@ -68,6 +73,11 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'err.http': '请求失败（{code}）。',
     'err.network': '无法连接主机。',
     'err.generic': '删除失败。',
+    'toast.deleted.title': '会话已删除',
+    'toast.deleted.body': '“{title}”及其会话日志已永久删除。',
+    'toast.forced.title': '已强制删除',
+    'toast.forced.body': '“{title}”已删除。它的内存实例会保留在当前进程中直到 DSH 重启；期间已从列表中移除。',
+    'toast.dismiss': '关闭',
   }
 
   function preferredDict() {
@@ -174,6 +184,10 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
 .sm-status{margin-top:8px;font-size:12px;color:var(--dsw-alias-label-secondary)}
 .sm-error{margin-top:8px;font-size:12px;color:var(--dsw-alias-state-error-primary)}
 .sm-dialog-foot{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:10px 16px;border-top:1px solid var(--dsw-alias-border-l1)}
+.sm-toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:60;max-width:min(560px,calc(100vw - 48px));padding:10px 14px;border-radius:8px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:12px;line-height:18px;box-shadow:0 6px 24px color-mix(in srgb, var(--dsw-alias-label-primary) 16%, transparent)}
+.sm-toast[data-kind="warn"]{border-color:var(--dsw-alias-state-warn-primary,var(--dsw-alias-border-l2))}
+.sm-toast-title{font-weight:600;margin-bottom:2px}
+.sm-toast-close{position:absolute;top:6px;right:8px;border:none;background:transparent;color:var(--dsw-alias-label-secondary);cursor:pointer;font-size:14px;line-height:14px;padding:2px 4px;border-radius:4px;font-family:inherit}
 .sm-btn{height:28px;padding:0 12px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:12px;cursor:pointer;font-family:inherit;white-space:nowrap}
 .sm-btn:hover:not(:disabled){background:color-mix(in srgb, var(--dsw-alias-label-primary) 8%, var(--dsw-alias-bg-layer-2))}
 .sm-btn:focus-visible:not(:disabled){outline:1px solid var(--dsw-alias-brand-primary);outline-offset:1px}
@@ -241,7 +255,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
 
   // ── the confirmation dialog ──────────────────────────────────────────────
 
-  function DeleteConfirmDialog({ usePending, dismissPending, t }) {
+  function DeleteConfirmDialog({ usePending, dismissPending, notifyDeleted, t }) {
     const pending = usePending((value) => value)
     const [deleting, setDeleting] = React.useState(false)
     const [error, setError] = React.useState(null)
@@ -282,7 +296,13 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
       setDeleting(true)
       setError(null)
       postDelete(pending.sessionId, force)
-        .then(() => { setDeleting(false); dismissPending() })
+        .then((result) => {
+          setDeleting(false)
+          dismissPending()
+          // A forced delete leaves the in-memory instance alive until the
+          // Harness restarts; say so, or the next session list may look odd.
+          notifyDeleted(pending.displayTitle, !!(result && result.forced), tFn)
+        })
         .catch((reason) => {
           setDeleting(false)
           // Known refusal codes get the localized copy; requestJson already
@@ -342,6 +362,31 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
       }, tFn('confirm.action')))))
   }
 
+  // ── the transient result toast ──────────────────────���────────────────────
+
+  // Own control in the same overlay slot: no global notification service is
+  // exposed to plugins, and a forced delete's "instance lives until restart"
+  // caveat must be visible after the dialog closes.
+  function DeleteToast({ useNotice, dismissToast, t }) {
+    const notice = useNotice((value) => value)
+    const timerRef = React.useRef(null)
+    React.useEffect(() => {
+      if (!notice) return undefined
+      clearTimeout(timerRef.current)
+      timerRef.current = setTimeout(() => dismissToast(), notice.forced ? 9000 : 4500)
+      return () => clearTimeout(timerRef.current)
+    }, [notice, dismissToast])
+    if (!notice) return null
+    const tFn = t || localT
+    return h('div', { className: 'sm-toast', 'data-kind': notice.forced ? 'warn' : 'info', role: 'status', 'aria-live': 'polite' },
+      h(Styles),
+      h('button', {
+        type: 'button', className: 'sm-toast-close', 'aria-label': tFn('toast.dismiss'), onClick: () => dismissToast(),
+      }, '\u00D7'),
+      h('div', { className: 'sm-toast-title' }, tFn(notice.forced ? 'toast.forced.title' : 'toast.deleted.title')),
+      h('div', undefined, tFn(notice.forced ? 'toast.forced.body' : 'toast.deleted.body', { title: notice.title })))
+  }
+
   // ── activation ───────────────────────────────────────────────────────────
 
   function apply(ctx) {
@@ -362,6 +407,10 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     const pending = makeStore(null)
     const requestDelete = (sessionId, displayTitle, exists) => pending.set({ sessionId, displayTitle, exists })
     const dismissPending = () => pending.set(null)
+    // One transient result notice, shown after the dialog closes.
+    const notice = makeStore(null)
+    const notifyDeleted = (displayTitle, forced) => notice.set({ title: displayTitle, forced, seq: Date.now() })
+    const dismissToast = () => notice.set(null)
 
     ctx.effect(() => slots.inject('sidebar.workspaces.session.menu.item', () => {
       try {
@@ -382,8 +431,15 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
       name: 'shell.overlay',
       id: 'dsh-session-manager.delete-confirm',
       locale: NS,
-      inject: () => ({ hooks: { pending }, dismissPending }),
+      inject: () => ({ hooks: { pending }, dismissPending, notifyDeleted }),
     }, DeleteConfirmDialog)), 'dsh-session-manager: delete dialog')
+
+    ctx.effect(() => slots.inject('shell.overlay', () => slots.register({
+      name: 'shell.overlay',
+      id: 'dsh-session-manager.delete-toast',
+      locale: NS,
+      inject: () => ({ hooks: { notice }, dismissToast }),
+    }, DeleteToast)), 'dsh-session-manager: result toast')
 
     console.log('[session-manager] client active')
   }
