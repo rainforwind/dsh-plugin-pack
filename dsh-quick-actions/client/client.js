@@ -286,6 +286,16 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
   const ctxKey = (sessionId) => (sessionId == null ? '@none' : String(sessionId));
   const runKey = (skey, buttonId) => `${skey}::${buttonId}`;
 
+  // `@none` is what an unready session collapses to. A card opened while the
+  // slot had no id yet must not reappear in the next session that also starts
+  // out without one, so a popover is shown only while it names a real session
+  // and that session is the one being rendered.
+  function popoverBelongsTo(popover, skey) {
+    if (!popover) return false;
+    if (skey === '@none') return false;
+    return popover.skey === skey;
+  }
+
   function notify() {
     for (const listener of store.listeners) {
       try { listener(); } catch (error) { /* one bad subscriber must not stop the rest */ }
@@ -754,7 +764,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     const dotState = runDotState(summary, store.reads.get(runKey(skey, button.id)));
     // The popover belongs to one strip: both strips share skeys on the main
     // session, so the variant must match too.
-    const open = !!store.popover && store.popover.skey === skey
+    const open = popoverBelongsTo(store.popover, skey)
       && store.popover.buttonId === button.id && store.popover.variant === variant;
 
     const togglePopover = () => {
@@ -828,6 +838,19 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       };
     }, [skey]);
 
+    // A card belongs to the session that opened it. When this strip moves to a
+    // different session (a newly created one, a switch), drop the stale card
+    // instead of letting it surface over the new session's strip.
+    React.useEffect(() => {
+      const popover = store.popover;
+      if (!popover) return;
+      if (popover.skey === skey) return;
+      const owner = store.active.get(popover.skey);
+      if (owner && owner.count > 0) return;
+      store.popover = null;
+      notify();
+    }, [skey]);
+
     const context = store.contexts.get(skey);
     const allButtons = (context && context.buttons) || [];
     // Decisions:
@@ -845,7 +868,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     // share skeys on the main session, so without the variant check a header
     // click would pop the sidebar card too (for a button the sidebar does not
     // even show).
-    const popover = store.popover && store.popover.skey === skey && store.popover.variant === variant
+    const popover = popoverBelongsTo(store.popover, skey) && store.popover.variant === variant
       ? store.popover
       : null;
 

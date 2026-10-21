@@ -933,5 +933,51 @@ await test('an open popover stays in the strip that opened it', async () => {
     'the sidebar must not pop a card for a button it does not show');
 });
 
+// A newly created session briefly renders its header slot without a sessionId,
+// which collapses to '@none'. A card recorded under that key used to reappear
+// over the new session's strip — reading as "it ran by itself".
+await test('a card opened in one session does not follow into a new one', async () => {
+  const slot = 'conversation.session.header.actions';
+  const original = slotProps[slot];
+
+  // 1. Open a card in the real session through its chevron.
+  slotProps[slot] = { sessionId: 'ses-1' };
+  let view = renderSlot(slot);
+  let chevron = findAll(view, (n) => n.props && n.props.className === 'qa-chev')[0];
+  assert.ok(chevron, 'chevron missing');
+  await chevron.props.onClick();
+  await flush();
+  view = renderSlot(slot);
+  if (findAll(view, (n) => n.props && n.props.className === 'qa-pop').length === 0) {
+    // The first click closed a card left open by an earlier test; open one.
+    chevron = findAll(view, (n) => n.props && n.props.className === 'qa-chev')[0];
+    await chevron.props.onClick();
+    await flush();
+    view = renderSlot(slot);
+  }
+  assert.ok(findAll(view, (n) => n.props && n.props.className === 'qa-pop').length > 0,
+    'the card should be open in ses-1');
+
+  // 2. The same strip now renders a brand-new session.
+  slotProps[slot] = { sessionId: 'ses-brand-new' };
+  view = renderSlot(slot);
+  assert.equal(findAll(view, (n) => n.props && n.props.className === 'qa-pop').length, 0,
+    'the card from ses-1 must not follow into the new session');
+
+  // 3. A frame where the new session id is not ready yet must not show it either.
+  slotProps[slot] = {};
+  view = renderSlot(slot);
+  assert.equal(findAll(view, (n) => n.props && n.props.className === 'qa-pop').length, 0,
+    'no card may render while the slot has no session id');
+
+  // 4. Switching sessions must never start a run by itself.
+  const posted = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run')
+    && String(c.body).includes('ses-brand-new'));
+  assert.equal(posted.length, 0, 'switching sessions must never start a run');
+
+  slotProps[slot] = original;
+  renderSlot(slot);
+});
+
 console.log(`\n${String(passed)} passed, ${String(failures.length)} failed`)
 process.exit(failures.length > 0 ? 1 : 0)
