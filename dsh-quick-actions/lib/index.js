@@ -38,11 +38,39 @@ const PARAM_NAME = /^[A-Za-z][A-Za-z0-9_]{0,31}$/
 const MAX_PARAM_VALUE = 2000
 const MAX_PARAMS = 8
 
-function defaultStorePath() {
-  const profileDir = process.env.DSH_PROFILE_DIR
-  if (profileDir) return join(profileDir, 'dsh-quick-actions.json')
-  return join(homedir(), '.dsh', 'dsh-quick-actions.json')
+const STORE_FILE = 'dsh-quick-actions.json'
+
+// `~` and `~/…` only; a relative path keeps the historical "resolve against
+// the host cwd" behaviour, so absolute paths are what the docs recommend.
+function expandHome(path) {
+  if (path === '~') return homedir()
+  if (path.startsWith('~/')) return join(homedir(), path.slice(2))
+  return path
 }
+
+// The store belongs to the profile that is RUNNING, not to whatever spawned the
+// host. `DSH_PROFILE_DIR` describes the launcher's session — a host started
+// from another profile's shell inherits it — so it is only a compatibility
+// fallback for hosts that predate `profileContext`. Getting this wrong reads an
+// empty file and the panel looks like it lost every button.
+function resolveStore(ctx, config) {
+  const explicit = typeof config.storePath === 'string' ? config.storePath.trim() : ''
+  if (explicit) return { path: expandHome(explicit), source: 'config' }
+
+  const profile = ctx.get('profileContext')
+  if (profile && typeof profile.dir === 'string' && profile.dir.trim()) {
+    return { path: join(profile.dir.trim(), STORE_FILE), source: 'profile' }
+  }
+
+  const envDir = (process.env.DSH_PROFILE_DIR || '').trim()
+  if (envDir) return { path: join(envDir, STORE_FILE), source: 'env' }
+
+  return { path: join(homedir(), '.dsh', STORE_FILE), source: 'home' }
+}
+
+// Where pre-`profileContext` versions looked: the one location a user upgrading
+// from would already have data in.
+const legacyStorePath = () => join(homedir(), '.dsh', STORE_FILE)
 
 function toInt(value, fallback, min, max) {
   const n = Number(value)
@@ -131,9 +159,8 @@ function apply(ctx, config = {}) {
 
   const maxOutputChars = toInt(config.maxOutputChars, 200000, 4000, 4000000)
   const pollMs = toInt(config.pollMs, 150, 5, 10000)
-  const storePath = typeof config.storePath === 'string' && config.storePath.trim()
-    ? config.storePath.trim()
-    : defaultStorePath()
+  const { path: storePath, source: storeSource } = resolveStore(ctx, config)
+  console.log(`[quick-actions] store: ${storePath} (source=${storeSource})`)
 
   // Static definitions from the patch layer: drop invalid ones loudly but keep
   // the plugin alive — a typo in the YAML must not take the bundle down.
@@ -148,10 +175,12 @@ function apply(ctx, config = {}) {
   }
 
   // ── JSON store (the panel's editable layer) ──────────────────────────────
-  function loadStore() {
+  // Parse one store file into validated buttons. Returns null when the file is
+  // unreadable, so the caller can tell "no file" from "empty list".
+  function readButtons(path) {
+    if (!existsSync(path)) return null
     try {
-      if (!existsSync(storePath)) return []
-      const raw = JSON.parse(readFileSync(storePath, 'utf8'))
+      const raw = JSON.parse(readFileSync(path, 'utf8'))
       const list = Array.isArray(raw) ? raw : Array.isArray(raw && raw.buttons) ? raw.buttons : []
       const result = validateList(list, configReserved)
       result.errors.forEach((error) => console.log(`[quick-actions] store dropped: ${error}`))
@@ -160,6 +189,27 @@ function apply(ctx, config = {}) {
       console.log(`[quick-actions] store unreadable (${String(error && error.message || error)}); starting empty`)
       return []
     }
+  }
+
+  function loadStore() {
+    const own = readButtons(storePath)
+    if (own !== null) return own
+    // Upgrading from a version that keyed the store off the launcher env: the
+    // data usually still sits in ~/.dsh. Show it once, but never write there —
+    // the first save lands in `storePath`, and the legacy file stays untouched
+    // as the rollback path. Only for the profile source: an env-derived path is
+    // exactly the wrong-profile directory this fix removes, so never read that.
+    if (storeSource === 'profile') {
+      const legacy = legacyStorePath()
+      if (legacy !== storePath) {
+        const inherited = readButtons(legacy)
+        if (inherited && inherited.length) {
+          console.log(`[quick-actions] store: legacy ${legacy} is visible; first save writes ${storePath}`)
+          return inherited
+        }
+      }
+    }
+    return []
   }
 
   let storeButtons = loadStore()
@@ -597,6 +647,7 @@ function apply(ctx, config = {}) {
           buttons: storeButtons,
           configButtons: parsedConfigButtons,
           storePath,
+          storeSource,
         })
         return
       }

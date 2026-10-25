@@ -13,7 +13,11 @@
 | 静态定义 | `cordis.patch.yml` 里插件行的 `config.buttons` | 只读（面板中灰底展示） |
 | 运行时定义 | 「+」面板增删改，落盘到 JSON store | 可以 |
 
-JSON store 默认路径：`$DSH_PROFILE_DIR/dsh-quick-actions.json`，未设置该环境变量时为 `~/.dsh/dsh-quick-actions.json`，可用 `config.storePath` 覆盖。写入采用「临时文件 + rename」的原子替换；校验失败的条目连同字段名一起回给面板，不会半写。
+JSON store 默认路径按**正在运行的 profile** 解析：`<profileContext.dir>/dsh-quick-actions.json`（即 `$DSH_HOME/profiles/<name>/…`）。宿主没有 `profileContext`（旧版本）时回退 `$DSH_PROFILE_DIR/dsh-quick-actions.json`，再回退 `~/.dsh/dsh-quick-actions.json`；`config.storePath` 始终优先（推荐写绝对路径，只展开前导 `~`）。
+
+`$DSH_PROFILE_DIR` 描述的是**启动者的**会话——从别的 profile 的 shell 里拉起的宿主会继承它——所以不能拿它当持久数据目录，那正是「按钮全部消失」的原因。`GET /quick-actions/config` 的 `storeSource` 字段会说明本次用的是哪一条（`config` / `profile` / `env` / `home`）。
+
+从旧位置升级上来时，profile 目录里的文件还不存在，此时**只读**一次 `~/.dsh/dsh-quick-actions.json` 让按钮仍然可见；第一次保存直接写到 profile 路径，旧文件原样保留作为回滚依据。写入采用「临时文件 + rename」的原子替换；校验失败的条目连同字段名一起回给面板，不会半写。
 
 一条定义的字段：
 
@@ -90,7 +94,7 @@ JSON store 默认路径：`$DSH_PROFILE_DIR/dsh-quick-actions.json`，未设置�
   name: 'dsh-quick-actions'
   config:
     workdir: /Users/you/projects     # 命令默认工作目录
-    storePath: /custom/path.json     # 按钮 store 路径
+    storePath: /custom/path.json     # 覆盖默认位置（默认 $DSH_HOME/profiles/<name>/, 建议绝对路径）
     maxOutputChars: 200000           # 单次运行保留的输出上限
     pollMs: 150                      # 输出泵间隔
     buttons:                         # 静态按钮（面板只读）
@@ -108,7 +112,7 @@ node test/run.mjs      # Host 半：scope 可见性/实例共享、执行生命�
 node test/client.mjs   # 浏览器半：槽位注册、按钮拉取、运行与 popover 输出、放大面板、「+」配置面板增删保存、失败提示、Esc
 ```
 
-覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；参数：必填缺失在 shell 启动前拒绝（400 `missing-param:<name>`）、值替换与回显、未知参数键丢弃、定义经 config 落盘往返、非法/重名参数的字段级报错；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换；参数：带参按钮点芯片即运行并复用卡片里填过的值、默认值以 placeholder 呈现、卡片填值后 POST 携带 `params`、管理面板可声明参数行、保存后重开参数仍在；以及新建会话（尚未进 header 索引）按自身目录解析 workspace、未分组会话实例不互相串味；宿主 `t` 解析不了命名空间时界面不漏出原始 locale key。
+覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；参数：必填缺失在 shell 启动前拒绝（400 `missing-param:<name>`）、值替换与回显、未知参数键丢弃、定义经 config 落盘往返、非法/重名参数的字段级报错；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换；参数：带参按钮点芯片即运行并复用卡片里填过的值、默认值以 placeholder 呈现、卡片填值后 POST 携带 `params`、管理面板可声明参数行、保存后重开参数仍在；以及新建会话（尚未进 header 索引）按自身目录解析 workspace、未分组会话实例不互相串味；store 位置：profile 优先于被污染的 `DSH_PROFILE_DIR`、无 `profileContext` 时走 env、显式 `storePath` 最高优先、profile 文件缺失时只读 legacy 且首次保存写 profile 路径、profile 文件存在时不合并 legacy；宿主 `t` 解析不了命名空间时界面不漏出原始 locale key。
 
 ## 卸载
 

@@ -6,7 +6,7 @@
 // definition store (validation + persistence round-trip).
 
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../lib/index.js'
@@ -67,7 +67,9 @@ function makeShell() {
 }
 
 // workspaces: [{ id, path, sessionIds }] rows for the registry stub.
-function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs = {} } = {}) {
+// profileContext: the Host service that names the running profile; omitted by
+// default so every existing case keeps exercising the compat path.
+function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs = {}, profileContext } = {}) {
   const routes = new Map()
   const webServer = {
     register(route) {
@@ -90,6 +92,7 @@ function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs 
       if (service === 'workspaceRegistry') return registry
       if (service === 'workingDirectory') return workingDirectory
       if (service === 'agents') return agents
+      if (service === 'profileContext') return profileContext
       return undefined
     },
     on() {},
@@ -672,6 +675,165 @@ await test('two ungrouped sessions never share a workspace-scoped instance', asy
 
   shell.executions[0].finish(0)
   await flush()
+})
+
+// ── store location: the running profile, not the launcher env ──────────────
+// A host started from another profile's shell inherits that profile's
+// DSH_PROFILE_DIR. Keying the store off it made every button vanish; the
+// authoritative answer is the `profileContext` service.
+
+const seed = (path, ids) => {
+  mkdirSync(join(path, '..'), { recursive: true })
+  writeFileSync(path, `${JSON.stringify({ version: 1, buttons: ids.map((id) => ({ id, label: id, command: 'echo hi', scope: 'global' })) }, null, 2)}\n`)
+}
+
+// HOME is what `homedir()` reads at call time on POSIX; point it at a temp dir
+// so the legacy fallback can be exercised without touching the real ~/.dsh.
+async function withHome(home, fn) {
+  const before = process.env.HOME
+  process.env.HOME = home
+  try { return await fn() } finally {
+    if (before === undefined) delete process.env.HOME
+    else process.env.HOME = before
+  }
+}
+
+async function withProfileEnv(dir, fn) {
+  const before = process.env.DSH_PROFILE_DIR
+  if (dir === undefined) delete process.env.DSH_PROFILE_DIR
+  else process.env.DSH_PROFILE_DIR = dir
+  try { return await fn() } finally {
+    if (before === undefined) delete process.env.DSH_PROFILE_DIR
+    else process.env.DSH_PROFILE_DIR = before
+  }
+}
+
+// AC1: the launcher env points at a store full of buttons; the profile does not.
+await test('the profile wins over a polluted launcher env', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-profile-'))
+  const p1 = join(root, 'p1')
+  const p2 = join(root, 'p2')
+  mkdirSync(p1, { recursive: true })
+  mkdirSync(p2, { recursive: true })
+  seed(join(p2, 'dsh-quick-actions.json'), ['from-launcher'])
+
+  await withHome(join(root, 'home'), async () => {
+    await withProfileEnv(p2, async () => {
+      const host = makeHost({ shell: makeShell(), profileContext: { name: 'web', dir: p1 } })
+      const config = await getConfig(host.routes)
+      assert.equal(config.storePath, join(p1, 'dsh-quick-actions.json'))
+      assert.equal(config.storeSource, 'profile')
+      assert.deepEqual(config.buttons, [], 'buttons must not come from the launcher profile')
+    })
+  })
+  rmSync(root, { recursive: true, force: true })
+})
+
+// AC1/AC6: the profile's own file is the only one read, even when both exist.
+await test('only the profile store is read when both locations exist', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-both-'))
+  const p1 = join(root, 'p1')
+  const p2 = join(root, 'p2')
+  mkdirSync(p1, { recursive: true })
+  mkdirSync(p2, { recursive: true })
+  seed(join(p1, 'dsh-quick-actions.json'), ['mine'])
+  seed(join(p2, 'dsh-quick-actions.json'), ['theirs'])
+
+  await withProfileEnv(p2, async () => {
+    const host = makeHost({ shell: makeShell(), profileContext: { name: 'web', dir: p1 } })
+    const config = await getConfig(host.routes)
+    assert.deepEqual(config.buttons.map((b) => b.id), ['mine'])
+  })
+  rmSync(root, { recursive: true, force: true })
+})
+
+// AC2: a host without profileContext keeps the old env behaviour.
+await test('a host without profileContext still honours DSH_PROFILE_DIR', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-env-'))
+  const p2 = join(root, 'p2')
+  mkdirSync(p2, { recursive: true })
+  seed(join(p2, 'dsh-quick-actions.json'), ['from-env'])
+
+  await withProfileEnv(p2, async () => {
+    const host = makeHost({ shell: makeShell() })
+    const config = await getConfig(host.routes)
+    assert.equal(config.storePath, join(p2, 'dsh-quick-actions.json'))
+    assert.equal(config.storeSource, 'env')
+    assert.deepEqual(config.buttons.map((b) => b.id), ['from-env'])
+  })
+  rmSync(root, { recursive: true, force: true })
+})
+
+// AC3: an explicit storePath outranks the profile and the env.
+await test('an explicit storePath wins over profile and env', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-explicit-'))
+  const p1 = join(root, 'p1')
+  const p2 = join(root, 'p2')
+  mkdirSync(p1, { recursive: true })
+  mkdirSync(p2, { recursive: true })
+  seed(join(p1, 'dsh-quick-actions.json'), ['profile-button'])
+  seed(join(p2, 'dsh-quick-actions.json'), ['env-button'])
+  const explicit = join(root, 'x.json')
+
+  await withProfileEnv(p2, async () => {
+    const host = makeHost({ shell: makeShell(), storePath: explicit, profileContext: { name: 'web', dir: p1 } })
+    const config = await getConfig(host.routes)
+    assert.equal(config.storePath, explicit)
+    assert.equal(config.storeSource, 'config')
+    assert.deepEqual(config.buttons, [], 'neither profile nor env may be consulted')
+
+    await postConfig(host.routes, [{ id: 'kept', label: 'kept', command: 'echo hi', scope: 'global' }])
+    const onDisk = JSON.parse(readFileSync(explicit, 'utf8'))
+    assert.equal(onDisk.buttons[0].id, 'kept', 'the write must land on the explicit path')
+  })
+  rmSync(root, { recursive: true, force: true })
+})
+
+// AC4 + AC5: an upgrade shows the legacy data once, then writes to the profile
+// file and leaves the legacy file byte-identical.
+await test('a fresh profile store shows the legacy file, then writes its own', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-legacy-'))
+  const home = join(root, 'home')
+  const p1 = join(root, 'p1')
+  mkdirSync(p1, { recursive: true })
+  const legacy = join(home, '.dsh', 'dsh-quick-actions.json')
+  seed(legacy, ['old-a', 'old-b'])
+  const legacyBytes = readFileSync(legacy, 'utf8')
+
+  await withHome(home, async () => {
+    await withProfileEnv(undefined, async () => {
+      const host = makeHost({ shell: makeShell(), profileContext: { name: 'web', dir: p1 } })
+      const config = await getConfig(host.routes)
+      assert.equal(config.storePath, join(p1, 'dsh-quick-actions.json'), 'the reported path stays the profile one')
+      assert.deepEqual(config.buttons.map((b) => b.id), ['old-a', 'old-b'], 'the legacy buttons must be visible')
+
+      await postConfig(host.routes, [{ id: 'new-one', label: 'new', command: 'echo hi', scope: 'global' }])
+      const own = join(p1, 'dsh-quick-actions.json')
+      assert.ok(existsSync(own), 'the first save must create the profile store')
+      assert.equal(JSON.parse(readFileSync(own, 'utf8')).buttons[0].id, 'new-one')
+      assert.equal(readFileSync(legacy, 'utf8'), legacyBytes, 'the legacy file must not be touched')
+    })
+  })
+  rmSync(root, { recursive: true, force: true })
+})
+
+// AC6: once the profile store exists the legacy file is never consulted.
+await test('an existing profile store is never merged with the legacy one', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-idem-'))
+  const home = join(root, 'home')
+  const p1 = join(root, 'p1')
+  mkdirSync(p1, { recursive: true })
+  seed(join(p1, 'dsh-quick-actions.json'), ['only-mine'])
+  seed(join(home, '.dsh', 'dsh-quick-actions.json'), ['legacy-one', 'legacy-two'])
+
+  await withHome(home, async () => {
+    await withProfileEnv(undefined, async () => {
+      const host = makeHost({ shell: makeShell(), profileContext: { name: 'web', dir: p1 } })
+      const config = await getConfig(host.routes)
+      assert.deepEqual(config.buttons.map((b) => b.id), ['only-mine'], 'legacy must not be merged in')
+    })
+  })
+  rmSync(root, { recursive: true, force: true })
 })
 
 // leave the temp store behind for OS cleanup
