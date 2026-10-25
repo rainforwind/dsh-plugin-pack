@@ -2,13 +2,12 @@
 # `config` is optional; recognized keys (a patch entry replaces the whole
 # config, so restate every key you care about):
 #
-#   storePath:    where the button JSON store lives. Default: the running
-#                 profile's dir (profileContext.dir, i.e.
-#                 $DSH_HOME/profiles/<name>/dsh-quick-actions.json). Hosts
-#                 without that service fall back to $DSH_PROFILE_DIR, then to
-#                 ~/.dsh/dsh-quick-actions.json. The env var describes the
-#                 LAUNCHER's session, not the running profile, so it only
-#                 serves compatibility. Absolute paths are recommended.
+#   storePath:    pin the button JSON store. Default resolution (first non-empty
+#                 wins): this key -> the path chosen in the plugin panel (kept in
+#                 <profile dir>/dsh-quick-actions.settings.json) -> the running
+#                 profile's dir -> $DSH_PROFILE_DIR -> ~/.dsh. Setting this key
+#                 makes the panel show the path as fixed and hide its field.
+#                 Absolute paths are recommended; a leading ~ is expanded.
 #   workdir:      default working directory for commands that set none
 #   buttons:      static button definitions, read-only in the UI panel
 #   maxOutputChars: per-run output cap kept in memory (default 200000)

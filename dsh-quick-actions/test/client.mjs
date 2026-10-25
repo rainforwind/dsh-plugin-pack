@@ -182,6 +182,36 @@ configResponse = {
 let configPostResponse = { ok: true, buttons: [], configButtons: [] }
 let runPostStatus = 200
 const fetchCalls = []
+
+// The host's store resolution, as `/quick-actions/config` reports it: the chain
+// it walked plus which entry won. Tests mutate this to mimic a profile host, a
+// legacy-visible upgrade, or a host without the config editor.
+const PROFILE_STORE = '/Users/me/.dsh/profiles/web/dsh-quick-actions.json'
+const LEGACY_STORE = '/Users/me/.dsh/dsh-quick-actions.json'
+function makeStoreInfo({ raw = '', pinnedBy = '', legacyVisible = true, exists = false } = {}) {
+  const candidates = [
+    { source: 'config', path: pinnedBy ? '/etc/pinned.json' : '', raw: pinnedBy ? '/etc/pinned.json' : '', active: false },
+    { source: 'panel', path: raw ? raw.replace(/^~(?=\/|$)/, '/home/me') : '', raw, active: false },
+    { source: 'profile', path: PROFILE_STORE, raw: '', active: false },
+    { source: 'env', path: '', raw: '', active: false },
+    { source: 'home', path: LEGACY_STORE, raw: '', active: false },
+  ]
+  const winner = candidates.find((c) => c.path) || candidates[4]
+  winner.active = true
+  return {
+    path: winner.path,
+    source: winner.source,
+    exists,
+    pinnedBy,
+    settingsPath: '/Users/me/.dsh/profiles/web/dsh-quick-actions.settings.json',
+    legacyPath: LEGACY_STORE,
+    legacyVisible,
+    candidates,
+  }
+}
+let storeInfo = makeStoreInfo()
+let storePostStatus = 202
+let storePostResponse = { ok: true, applying: true }
 // A stateful store so a save followed by a reopen is faithful: the config GET
 // must return what the last POST wrote, exactly as the host store does.
 let configStore = null
@@ -196,6 +226,26 @@ globalThis.fetch = async (url, options) => {
     return reply(200, runGetResponse);
   }
   if (url.includes('/quick-actions/kill')) return reply(200, { ok: true, run: null });
+  if (url.includes('/quick-actions/store')) {
+    const payload = options && options.body ? JSON.parse(options.body) : {};
+    if (storePostStatus !== 202) {
+      return reply(storePostStatus, {
+        ok: false,
+        error: 'config-editor-unavailable',
+        message: 'this host has no configEditor service; edit config.storePath in cordis.patch.yml',
+      });
+    }
+    // Mimic the host: the new resolution is answered on the same response.
+    storeInfo = makeStoreInfo({ raw: payload.storePath || '', legacyVisible: false });
+    return reply(200, {
+      ok: true,
+      buttons: [],
+      configButtons: [],
+      storePath: storeInfo.path,
+      storeSource: storeInfo.source,
+      store: storeInfo,
+    });
+  }
   if (url.includes('/quick-actions/config')) {
     if (method === 'POST') {
       const payload = options && options.body ? JSON.parse(options.body) : { buttons: [] };
@@ -204,8 +254,8 @@ globalThis.fetch = async (url, options) => {
       configPostResponse = { ok: true, buttons: configStore, configButtons: [] };
       return reply(runPostStatus === 200 ? 200 : runPostStatus, configPostResponse);
     }
-    if (configStore) return reply(200, { ok: true, buttons: configStore, configButtons: [], storePath: '/tmp/qa.json' });
-    return reply(200, configResponse);
+    if (configStore) return reply(200, { ok: true, buttons: configStore, configButtons: [], storePath: '/tmp/qa.json', store: storeInfo });
+    return reply(200, { ...configResponse, store: storeInfo });
   }
   throw new Error(`unexpected url ${url}`);
 };
@@ -977,6 +1027,82 @@ await test('a card opened in one session does not follow into a new one', async 
 
   slotProps[slot] = original;
   renderSlot(slot);
+});
+
+// ── store location in the panel ────────────────────────────────────────────
+
+// Open the config panel from scratch and wait for the config fetch to land.
+async function openPanel() {
+  storeInfo = makeStoreInfo();
+  storePostStatus = 202;
+  header = renderSlot('conversation.session.header.actions');
+  await buttonByText(header, '+').props.onClick();
+  await flush();
+  return () => renderSlot('shell.overlay');
+}
+
+await test('the panel shows the store resolution chain and marks the winner', async () => {
+  const panel = await openPanel();
+  const text = textOf(panel());
+  assert.ok(text.includes('Store location'), 'store section missing');
+  assert.ok(text.includes('Running profile'), 'profile candidate missing');
+  assert.ok(text.includes(PROFILE_STORE), 'the resolved path is not shown');
+  assert.ok(text.includes(LEGACY_STORE), 'the home fallback is not shown');
+  assert.ok(text.includes('in use'), 'the active candidate is not marked');
+  assert.ok(text.includes('read-only'), 'the legacy note is missing');
+
+  const active = findAll(panel(), (n) => n.props && n.props.className === 'qa-cand'
+    && n.props['data-active'] === 'true');
+  assert.equal(active.length, 1, 'exactly one candidate must be marked active');
+  assert.equal(active[0].props.key, 'profile', 'the profile candidate should be the winner');
+});
+
+await test('saving a custom path posts it and shows the new resolution', async () => {
+  const panel = await openPanel();
+  const input = findAll(panel(), (n) => n.type === 'input' && n.props['aria-label'] === 'Custom path')[0];
+  assert.ok(input, 'the path field is missing on an editable host');
+
+  await input.props.onChange({ target: { value: '  /tmp/custom.json  ' } });
+  await buttonByText(panel(), 'Save path').props.onClick();
+  await flush();
+
+  const posted = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/store'));
+  assert.equal(posted.length, 1, 'the path was never persisted');
+  assert.equal(JSON.parse(posted[0].body).storePath, '/tmp/custom.json', 'the value must be trimmed');
+
+  const text = textOf(panel());
+  assert.ok(text.includes('/tmp/custom.json'), 'the new path is not echoed');
+  assert.ok(text.includes('Panel override'), 'the override candidate is missing');
+});
+
+await test('the default button clears the override', async () => {
+  const panel = await openPanel();
+  const input = findAll(panel(), (n) => n.type === 'input' && n.props['aria-label'] === 'Custom path')[0];
+  await input.props.onChange({ target: { value: '/tmp/once.json' } });
+  await buttonByText(panel(), 'Save path').props.onClick();
+  await flush();
+
+  const clear = buttonByText(panel(), 'Use default');
+  assert.ok(clear, 'the reset control is missing');
+  await clear.props.onClick();
+  await flush();
+
+  const posted = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/store'));
+  assert.equal(JSON.parse(posted[posted.length - 1].body).storePath, '', 'clearing must send an empty path');
+  assert.ok(textOf(panel()).includes(PROFILE_STORE), 'the resolution must fall back to the profile');
+});
+
+await test('a path pinned by cordis.patch.yml hides the field and says why', async () => {
+  storeInfo = makeStoreInfo({ pinnedBy: 'config' });
+  header = renderSlot('conversation.session.header.actions');
+  await buttonByText(header, '+').props.onClick();
+  await flush();
+
+  const panel = renderSlot('shell.overlay');
+  assert.ok(textOf(panel).includes('Pinned by config.storePath'), 'the pinned note is missing');
+  assert.equal(findAll(panel, (n) => n.type === 'input' && n.props['aria-label'] === 'Custom path').length, 0,
+    'the field must not be offered when the patch wins');
+  storeInfo = makeStoreInfo();
 });
 
 console.log(`\n${String(passed)} passed, ${String(failures.length)} failed`)

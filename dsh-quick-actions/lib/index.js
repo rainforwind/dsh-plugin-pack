@@ -19,7 +19,7 @@
 // panel edits at runtime. Runs execute through `ctx.shell`; output is pumped
 // from the handle's non-consuming observed readers into an in-memory buffer
 // that the HTTP routes hand to every viewer of that instance.
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -39,6 +39,7 @@ const MAX_PARAM_VALUE = 2000
 const MAX_PARAMS = 8
 
 const STORE_FILE = 'dsh-quick-actions.json'
+const SETTINGS_FILE = 'dsh-quick-actions.settings.json'
 
 // `~` and `~/…` only; a relative path keeps the historical "resolve against
 // the host cwd" behaviour, so absolute paths are what the docs recommend.
@@ -48,24 +49,59 @@ function expandHome(path) {
   return path
 }
 
+// Where the panel's own override lives. It has to be findable without knowing
+// the store path — that is the whole point — so it sits in the profile dir,
+// next to the store the profile would use by default.
+function settingsPathOf(ctx) {
+  const profile = ctx.get('profileContext')
+  const dir = profile && typeof profile.dir === 'string' ? profile.dir.trim() : ''
+  return dir ? join(dir, SETTINGS_FILE) : join(homedir(), '.dsh', SETTINGS_FILE)
+}
+
+// A malformed settings file must never take the plugin down: it is an optional
+// convenience layer, so a bad read degrades to "no override".
+function readSettings(path) {
+  try {
+    if (!existsSync(path)) return {}
+    const raw = JSON.parse(readFileSync(path, 'utf8'))
+    return raw && typeof raw === 'object' ? raw : {}
+  } catch (error) {
+    console.log(`[quick-actions] settings unreadable (${String(error && error.message || error)}); ignoring the panel override`)
+    return {}
+  }
+}
+
+// Every place the store may come from, in precedence order. The first entry
+// whose path is non-empty wins; the panel renders this same list so what it
+// shows and what the code actually does cannot drift apart.
+//
+// `config` (cordis.patch.yml) outranks the panel on purpose: an administrator
+// who pinned a path did so to override the UI, and the panel says so instead of
+// pretending the field is free.
+function storeCandidates(ctx, config, settings) {
+  const explicit = typeof config.storePath === 'string' ? config.storePath.trim() : ''
+  const fromPanel = settings && typeof settings.storePath === 'string' ? settings.storePath.trim() : ''
+  const profile = ctx.get('profileContext')
+  const profileDir = profile && typeof profile.dir === 'string' ? profile.dir.trim() : ''
+  const envDir = (process.env.DSH_PROFILE_DIR || '').trim()
+  return [
+    { source: 'config', raw: explicit, path: explicit ? expandHome(explicit) : '' },
+    { source: 'panel', raw: fromPanel, path: fromPanel ? expandHome(fromPanel) : '' },
+    { source: 'profile', path: profileDir ? join(profileDir, STORE_FILE) : '' },
+    { source: 'env', path: envDir ? join(envDir, STORE_FILE) : '' },
+    { source: 'home', path: join(homedir(), '.dsh', STORE_FILE) },
+  ]
+}
+
 // The store belongs to the profile that is RUNNING, not to whatever spawned the
 // host. `DSH_PROFILE_DIR` describes the launcher's session — a host started
 // from another profile's shell inherits it — so it is only a compatibility
 // fallback for hosts that predate `profileContext`. Getting this wrong reads an
 // empty file and the panel looks like it lost every button.
 function resolveStore(ctx, config) {
-  const explicit = typeof config.storePath === 'string' ? config.storePath.trim() : ''
-  if (explicit) return { path: expandHome(explicit), source: 'config' }
-
-  const profile = ctx.get('profileContext')
-  if (profile && typeof profile.dir === 'string' && profile.dir.trim()) {
-    return { path: join(profile.dir.trim(), STORE_FILE), source: 'profile' }
-  }
-
-  const envDir = (process.env.DSH_PROFILE_DIR || '').trim()
-  if (envDir) return { path: join(envDir, STORE_FILE), source: 'env' }
-
-  return { path: join(homedir(), '.dsh', STORE_FILE), source: 'home' }
+  const candidates = storeCandidates(ctx, config, readSettings(settingsPathOf(ctx)))
+  const winner = candidates.find((candidate) => candidate.path) || candidates[candidates.length - 1]
+  return { path: winner.path, source: winner.source, candidates }
 }
 
 // Where pre-`profileContext` versions looked: the one location a user upgrading
@@ -159,8 +195,16 @@ function apply(ctx, config = {}) {
 
   const maxOutputChars = toInt(config.maxOutputChars, 200000, 4000, 4000000)
   const pollMs = toInt(config.pollMs, 150, 5, 10000)
-  const { path: storePath, source: storeSource } = resolveStore(ctx, config)
+  // Rebindable: choosing another store from the panel re-resolves these in
+  // place, so the switch takes effect without restarting the host.
+  let resolution = resolveStore(ctx, config)
+  let storePath = resolution.path
+  let storeSource = resolution.source
+  let storeCandidatesResult = resolution.candidates
   console.log(`[quick-actions] store: ${storePath} (source=${storeSource})`)
+  // Whether the buttons on screen came from the read-only legacy fallback; the
+  // panel explains that, otherwise a path with no file looks like a data loss.
+  let storeFromLegacy = false
 
   // Static definitions from the patch layer: drop invalid ones loudly but keep
   // the plugin alive — a typo in the YAML must not take the bundle down.
@@ -205,6 +249,7 @@ function apply(ctx, config = {}) {
         const inherited = readButtons(legacy)
         if (inherited && inherited.length) {
           console.log(`[quick-actions] store: legacy ${legacy} is visible; first save writes ${storePath}`)
+          storeFromLegacy = true
           return inherited
         }
       }
@@ -220,6 +265,43 @@ function apply(ctx, config = {}) {
     const tmp = `${storePath}.tmp`
     writeFileSync(tmp, `${JSON.stringify({ version: 1, buttons: storeButtons }, null, 2)}\n`)
     renameSync(tmp, storePath)
+  }
+
+  // `config.storePath` in cordis.patch.yml outranks the panel by design, so the
+  // panel reports it as pinned instead of offering a field that cannot win.
+  const configStorePath = typeof config.storePath === 'string' ? config.storePath.trim() : ''
+  const settingsPath = settingsPathOf(ctx)
+
+  // The store state the panel renders. Built from the same candidate list the
+  // resolver walks, so the explanation cannot drift from the behaviour.
+  function describeStore() {
+    return {
+      path: storePath,
+      source: storeSource,
+      exists: existsSync(storePath),
+      pinnedBy: configStorePath ? 'config' : '',
+      settingsPath,
+      legacyPath: legacyStorePath(),
+      legacyVisible: storeFromLegacy,
+      candidates: storeCandidatesResult.map((candidate) => ({
+        source: candidate.source,
+        path: candidate.path,
+        raw: candidate.raw === undefined ? '' : candidate.raw,
+        active: !!candidate.path && candidate.path === storePath,
+      })),
+    }
+  }
+
+  // Re-resolve after the panel wrote its override, and swap the live store over
+  // to the winning path: no host restart, and the next save lands there.
+  function rebindStore() {
+    resolution = resolveStore(ctx, config)
+    storePath = resolution.path
+    storeSource = resolution.source
+    storeCandidatesResult = resolution.candidates
+    storeFromLegacy = false
+    storeButtons = loadStore()
+    console.log(`[quick-actions] store: ${storePath} (source=${storeSource})`)
   }
 
   function allButtons() {
@@ -642,12 +724,14 @@ function apply(ctx, config = {}) {
     route('/quick-actions/config', async (request, response) => {
       if (request.method === 'OPTIONS') { sendJson(response, 204, {}); return }
       if (request.method === 'GET') {
+        const legacy = legacyStorePath()
         sendJson(response, 200, {
           ok: true,
           buttons: storeButtons,
           configButtons: parsedConfigButtons,
           storePath,
           storeSource,
+          store: describeStore(),
         })
         return
       }
@@ -682,6 +766,76 @@ function apply(ctx, config = {}) {
       }
       response.writeHead(405)
       response.end()
+    })
+
+    // The panel's store override. It lives in the profile dir as a small
+    // settings file rather than in cordis.patch.yml: `configEditor` only owns
+    // rows the profile patch itself declares, and this plugin is inserted by its
+    // bundle, so editing it that way is not addressable. Owning the file also
+    // means the switch takes effect immediately — `rebindStore()` swaps the live
+    // path instead of waiting for a host restart.
+    route('/quick-actions/store', async (request, response) => {
+      if (request.method === 'OPTIONS') { sendJson(response, 204, {}); return }
+      if (request.method !== 'POST') { response.writeHead(405); response.end(); return }
+
+      const body = await readBody(request)
+      if (!body || typeof body.storePath !== 'string') {
+        sendJson(response, 400, { ok: false, error: 'bad-request', message: 'storePath: expected a string' })
+        return
+      }
+      const raw = body.storePath.trim()
+      if (raw && raw.length > MAX_PATH_FIELD) {
+        sendJson(response, 400, { ok: false, error: 'bad-path', message: `storePath: at most ${MAX_PATH_FIELD} characters` })
+        return
+      }
+      // The value ends up inside a JSON document other tools may read; keep it
+      // to something that cannot break out of a scalar.
+      if (/[\r\n\t\0]/.test(raw)) {
+        sendJson(response, 400, { ok: false, error: 'bad-path', message: 'storePath: no line breaks or tabs' })
+        return
+      }
+      if (configStorePath) {
+        sendJson(response, 409, {
+          ok: false,
+          error: 'pinned-by-config',
+          message: `config.storePath is pinned to ${configStorePath}; change it in cordis.patch.yml`,
+        })
+        return
+      }
+
+      // Write before rebinding: a path that cannot be persisted must not appear
+      // to work until the next restart, which would look like silent data loss.
+      try {
+        const nextSettings = { ...readSettings(settingsPath), }
+        if (raw) nextSettings.storePath = raw
+        else delete nextSettings.storePath
+        const dir = dirname(settingsPath)
+        mkdirSync(dir, { recursive: true })
+        if (Object.keys(nextSettings).length === 0) {
+          if (existsSync(settingsPath)) unlinkSync(settingsPath)
+        } else {
+          const tmp = `${settingsPath}.tmp`
+          writeFileSync(tmp, `${JSON.stringify(nextSettings, null, 2)}\n`)
+          renameSync(tmp, settingsPath)
+        }
+      } catch (error) {
+        sendJson(response, 500, {
+          ok: false,
+          error: 'settings-write-failed',
+          message: String(error && error.message || error),
+        })
+        return
+      }
+
+      rebindStore()
+      sendJson(response, 200, {
+        ok: true,
+        buttons: storeButtons,
+        configButtons: parsedConfigButtons,
+        storePath,
+        storeSource,
+        store: describeStore(),
+      })
     })
 
     hostCtx.effect(() => () => {

@@ -69,7 +69,7 @@ function makeShell() {
 // workspaces: [{ id, path, sessionIds }] rows for the registry stub.
 // profileContext: the Host service that names the running profile; omitted by
 // default so every existing case keeps exercising the compat path.
-function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs = {}, profileContext } = {}) {
+function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs = {}, profileContext, configEditor } = {}) {
   const routes = new Map()
   const webServer = {
     register(route) {
@@ -93,6 +93,7 @@ function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs 
       if (service === 'workingDirectory') return workingDirectory
       if (service === 'agents') return agents
       if (service === 'profileContext') return profileContext
+      if (service === 'configEditor') return configEditor
       return undefined
     },
     on() {},
@@ -833,6 +834,106 @@ await test('an existing profile store is never merged with the legacy one', asyn
       assert.deepEqual(config.buttons.map((b) => b.id), ['only-mine'], 'legacy must not be merged in')
     })
   })
+  rmSync(root, { recursive: true, force: true })
+})
+
+// ── editing the store path from the panel ──────────────────────────────────
+
+const waitTick = () => new Promise((resolve) => { setTimeout(resolve, 10) })
+
+await test('the panel override moves the live store without a restart', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-panel-'))
+  const p1 = join(root, 'p1')
+  mkdirSync(p1, { recursive: true })
+  seed(join(p1, 'dsh-quick-actions.json'), ['profile-button'])
+  const custom = join(root, 'custom.json')
+
+  const host = makeHost({ shell: makeShell(), profileContext: { name: 'web', dir: p1 } })
+  let config = await getConfig(host.routes)
+  assert.equal(config.storeSource, 'profile')
+  assert.deepEqual(config.store.candidates.map((c) => c.source), ['config', 'panel', 'profile', 'env', 'home'])
+  assert.equal(config.store.candidates.find((c) => c.active).source, 'profile')
+  assert.equal(config.store.pinnedBy, '', 'nothing pins the path here')
+
+  const answer = await call(host.routes, '/quick-actions/store', { method: 'POST', body: { storePath: custom } })
+  assert.equal(answer.status, 200)
+  // Rebinding is in-process: the same response already reports the new state.
+  assert.equal(answer.body.storePath, custom)
+  assert.equal(answer.body.storeSource, 'panel')
+  assert.equal(answer.body.store.candidates[1].active, true, 'the panel row must now be the winner')
+  assert.equal(answer.body.store.exists, false, 'the target file does not exist yet')
+
+  const settings = JSON.parse(readFileSync(join(p1, 'dsh-quick-actions.settings.json'), 'utf8'))
+  assert.equal(settings.storePath, custom, 'the override was not persisted next to the profile')
+
+  // A later save lands on the chosen path, not the profile default.
+  await postConfig(host.routes, [{ id: 'moved', label: 'moved', command: 'echo hi', scope: 'global' }])
+  assert.equal(JSON.parse(readFileSync(custom, 'utf8')).buttons[0].id, 'moved')
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(p1, 'dsh-quick-actions.json'), 'utf8')).buttons.map((b) => b.id),
+    ['profile-button'],
+    'the previous store must stay untouched',
+  )
+
+  config = await getConfig(host.routes)
+  assert.equal(config.storePath, custom)
+  rmSync(root, { recursive: true, force: true })
+})
+
+await test('clearing the override returns to the profile store', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-panel-clear-'))
+  const p1 = join(root, 'p1')
+  mkdirSync(p1, { recursive: true })
+  seed(join(p1, 'dsh-quick-actions.json'), ['back-home'])
+  const settingsPath = join(p1, 'dsh-quick-actions.settings.json')
+  const custom = join(root, 'custom.json')
+
+  const host = makeHost({ shell: makeShell(), profileContext: { name: 'web', dir: p1 } })
+  await call(host.routes, '/quick-actions/store', { method: 'POST', body: { storePath: custom } })
+  assert.ok(existsSync(settingsPath), 'the override file should exist after pinning')
+
+  const answer = await call(host.routes, '/quick-actions/store', { method: 'POST', body: { storePath: '   ' } })
+  assert.equal(answer.status, 200)
+  assert.equal(answer.body.storeSource, 'profile')
+  assert.equal(answer.body.storePath, join(p1, 'dsh-quick-actions.json'))
+  assert.deepEqual(answer.body.buttons.map((b) => b.id), ['back-home'], 'the profile buttons must be back')
+  assert.ok(!existsSync(settingsPath), 'an empty override must remove the file, not store "" ')
+  rmSync(root, { recursive: true, force: true })
+})
+
+await test('a path pinned by cordis.patch.yml cannot be overridden from the panel', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-panel-pinned-'))
+  const p1 = join(root, 'p1')
+  mkdirSync(p1, { recursive: true })
+  const pinned = join(root, 'pinned.json')
+
+  const host = makeHost({
+    shell: makeShell(),
+    profileContext: { name: 'web', dir: p1 },
+    config: { storePath: pinned },
+  })
+  const config = await getConfig(host.routes)
+  assert.equal(config.store.pinnedBy, 'config', 'the panel must know it is pinned')
+
+  const answer = await call(host.routes, '/quick-actions/store', { method: 'POST', body: { storePath: join(root, 'other.json') } })
+  assert.equal(answer.status, 409)
+  assert.equal(answer.body.error, 'pinned-by-config')
+  assert.ok(!existsSync(join(p1, 'dsh-quick-actions.settings.json')), 'nothing may be written')
+  rmSync(root, { recursive: true, force: true })
+})
+
+await test('a path that would break the settings document is rejected', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'qa-panel-bad-'))
+  const p1 = join(root, 'p1')
+  mkdirSync(p1, { recursive: true })
+  const host = makeHost({ shell: makeShell(), profileContext: { name: 'web', dir: p1 } })
+
+  for (const bad of ['/tmp/a\nstorePath: /evil', '/tmp/a\tb']) {
+    const answer = await call(host.routes, '/quick-actions/store', { method: 'POST', body: { storePath: bad } })
+    assert.equal(answer.status, 400, `accepted a dangerous path: ${JSON.stringify(bad)}`)
+    assert.equal(answer.body.error, 'bad-path')
+  }
+  assert.ok(!existsSync(join(p1, 'dsh-quick-actions.settings.json')))
   rmSync(root, { recursive: true, force: true })
 })
 

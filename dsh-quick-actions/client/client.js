@@ -66,6 +66,25 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     'config.empty': 'No buttons yet — add one below.',
     'config.readonly': 'From cordis.patch.yml (read-only)',
     'config.store': 'Stored in {path}',
+    'store.title': 'Store location',
+    'store.order': 'First available source wins, top to bottom.',
+    'store.source.config': 'Panel override (config.storePath)',
+    'store.source.profile': 'Running profile',
+    'store.source.env': 'DSH_PROFILE_DIR (legacy hosts)',
+    'store.source.home': 'Home fallback',
+    'store.active': 'in use',
+    'store.unset': 'not set',
+    'store.missing': 'no file yet',
+    'store.legacy': 'These buttons came from {path} (read-only). The first save writes to the location marked above.',
+    'store.custom': 'Custom path',
+    'store.placeholder': 'Leave empty to follow the profile (a leading ~ is expanded)',
+    'store.save': 'Save path',
+    'store.clear': 'Use default',
+    'store.saved': 'Saved — reloading…',
+    'store.source.panel': 'Panel override',
+    'store.pinned': 'Pinned by config.storePath in cordis.patch.yml — change it there.',
+    'store.newFile': 'That file does not exist yet: the list starts empty and the first save creates it. Nothing was deleted.',
+    'store.badPath': 'The path cannot contain line breaks or tabs.',
     'config.deleteConfirm': 'Delete “{label}”?',
     'config.edit': 'Edit {label}',
     'config.delete': 'Delete {label}',
@@ -147,6 +166,25 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     'config.empty': '还没有按钮，在下方添加。',
     'config.readonly': '来自 cordis.patch.yml（只读）',
     'config.store': '存储于 {path}',
+    'store.title': '存储位置',
+    'store.order': '按下面的顺序解析，第一个有值的生效。',
+    'store.source.config': '面板覆盖（config.storePath）',
+    'store.source.profile': '正在运行的 profile',
+    'store.source.env': 'DSH_PROFILE_DIR（兼容旧宿主）',
+    'store.source.home': '~/.dsh 兜底',
+    'store.active': '使用中',
+    'store.unset': '未设置',
+    'store.missing': '文件尚未生成',
+    'store.legacy': '当前按钮来自 {path}（只读）。第一次保存会写到上面标记的位置。',
+    'store.custom': '自定义路径',
+    'store.placeholder': '留空则跟随 profile（前导 ~ 会被展开）',
+    'store.save': '保存路径',
+    'store.clear': '恢复默认',
+    'store.saved': '已保存，正在重新加载…',
+    'store.source.panel': '面板覆盖',
+    'store.pinned': '路径被 cordis.patch.yml 里的 config.storePath 固定，请在那边修改。',
+    'store.newFile': '该文件还不存在：列表从空开始，第一次保存会创建它。没有删除任何东西。',
+    'store.badPath': '路径不能包含换行或制表符。',
     'config.deleteConfirm': '删除「{label}」？',
     'config.edit': '编辑 {label}',
     'config.delete': '删除 {label}',
@@ -271,10 +309,14 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     reads: new Map(),      // `key::buttonId` -> run token whose result was displayed
     popover: null,         // { skey, sessionId, buttonId }
     overlay: null,         // { kind: 'config' } | { kind: 'output', skey, sessionId, buttonId }
-    config: null,          // { buttons, configButtons, storePath }
+    config: null,          // { buttons, configButtons, storePath, store }
+    configEpoch: 0,        // bumped when the store itself moved, so the list reseeds
     configBusy: false,
     configError: null,
     savedFlash: false,
+    storeBusy: false,      // a storePath write is in flight
+    storeError: null,
+    storeFlash: false,
     listeners: new Set(),
   };
 
@@ -433,10 +475,45 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
       buttons: Array.isArray(data.buttons) ? data.buttons : [],
       configButtons: Array.isArray(data.configButtons) ? data.configButtons : [],
       storePath: data.storePath || '',
+      // The host also sends the whole resolution chain, so the panel can show
+      // why this path won and let the user pin another one.
+      store: data.store && typeof data.store === 'object' ? data.store : null,
     };
     store.configError = null;
     notify();
     return store.config;
+  }
+
+  // Persisting a path re-resolves inside the host and answers with the new
+  // state, so the panel can show the result immediately: no polling, and no
+  // restart for the new store to take effect.
+  async function saveStorePath(storePath) {
+    store.storeBusy = true;
+    store.storeError = null;
+    store.storeFlash = false;
+    notify();
+    try {
+      const data = await postJson('/quick-actions/store', { storePath });
+      store.config = {
+        buttons: Array.isArray(data.buttons) ? data.buttons : [],
+        configButtons: Array.isArray(data.configButtons)
+          ? data.configButtons
+          : ((store.config && store.config.configButtons) || []),
+        storePath: data.storePath || '',
+        store: data.store && typeof data.store === 'object' ? data.store : null,
+      };
+      store.storeFlash = true;
+      // The rows now belong to a different file: let the list reseed instead of
+      // leaving the previous location's buttons on screen.
+      store.configEpoch += 1;
+    } catch (error) {
+      store.storeError = error.data && error.data.message
+        ? error.data.message
+        : errorText(error);
+    } finally {
+      store.storeBusy = false;
+      notify();
+    }
   }
 
   function refreshActiveContexts() {
@@ -474,7 +551,10 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     store.popover = null;
     store.overlay = { kind: 'config' };
     notify();
-    if (!store.config) loadConfig().catch(() => {});
+    // Always refresh on open: the store path may have changed since last time
+    // (another host, a hand-edited profile patch), and the panel is the one
+    // place that is supposed to explain where the data actually lives.
+    loadConfig().catch(() => {});
   }
 
   function expandOutput(entry) {
@@ -628,6 +708,18 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
 .qa-toolbar{display:flex;align-items:center;gap:8px}
 .qa-sectiontitle{font-size:11px;font-weight:600;color:var(--dsw-alias-label-secondary)}
 .qa-hint{font-size:11px;color:var(--dsw-alias-label-dimmed);line-height:1.5}
+/* Store resolution: the chain is a list of candidates, the winner carries the
+   only saturated mark so "which one is in use" reads at a glance. */
+.qa-store{display:flex;flex-direction:column;gap:6px;margin-top:10px;padding-top:10px;border-top:1px solid var(--dsw-alias-border-l2)}
+.qa-cands{display:flex;flex-direction:column;gap:3px}
+.qa-cand{display:flex;align-items:baseline;gap:8px;padding:3px 7px;border-radius:5px;border:1px solid transparent;background:var(--dsw-alias-bg-layer-1);font-size:11px}
+.qa-cand[data-active="true"]{border-color:var(--dsw-alias-state-business-primary);background:color-mix(in srgb, var(--dsw-alias-state-business-primary) 12%, transparent)}
+.qa-cand-src{flex:none;min-width:132px;color:var(--dsw-alias-label-secondary)}
+.qa-cand-path{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--dsw-alias-label-primary)}
+.qa-cand[data-empty="true"] .qa-cand-path{color:var(--dsw-alias-label-tertiary);font-style:italic;font-family:inherit}
+.qa-cand-badge{flex:none;font-size:10px;font-weight:600;color:var(--dsw-alias-state-business-primary)}
+.qa-store-row{display:flex;align-items:center;gap:6px}
+.qa-store-row .qa-input{flex:1;min-width:0}
 .qa-error{font-size:11px;color:var(--dsw-alias-state-error-primary);white-space:pre-wrap}
 .qa-flash{font-size:11px;color:var(--dsw-alias-state-success-primary)}
 @keyframes qa-spin{to{transform:rotate(360deg)}}
@@ -1029,6 +1121,86 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
 
   const blankForm = () => ({ index: -1, id: '', label: '', icon: '', command: '', workdir: '', scope: 'global', target: '', params: [] });
 
+  // Where the store lives, and why. The host sends the resolution chain it
+  // actually walked, so this panel never re-implements the precedence rules —
+  // it renders the list and marks the winner. Editing writes config.storePath
+  // through the host's config editor, which persists it in the profile patch.
+  function StoreSection({ t, config }) {
+    const info = config && config.store;
+    const candidates = (info && Array.isArray(info.candidates)) ? info.candidates : [];
+    const configRaw = candidates.length && candidates[0] ? String(candidates[0].raw || '') : '';
+    const [draft, setDraft] = React.useState(null);
+
+    // Follow the persisted value: after a save the host re-resolves and sends a
+    // new raw value, which is what the field should show.
+    React.useEffect(() => { setDraft(configRaw); }, [configRaw]);
+
+    const value = draft === null ? configRaw : draft;
+    const trimmed = value.trim();
+    const dirty = trimmed !== configRaw.trim();
+    const invalid = /[\r\n\t\0]/.test(value);
+    // A path pinned in cordis.patch.yml outranks the panel, so the field is not
+    // offered at all — a control that cannot win is worse than no control.
+    const pinned = !!(info && info.pinnedBy);
+    const editable = !!info && !pinned;
+
+    const submit = (next) => {
+      if (invalid) { store.storeError = t('store.badPath'); notify(); return; }
+      store.storeError = null;
+      saveStorePath(next);
+    };
+
+    return h('div', { className: 'qa-store' },
+      h('span', { className: 'qa-sectiontitle' }, t('store.title')),
+      h('span', { className: 'qa-hint' }, t('store.order')),
+      candidates.length
+        ? h('div', { className: 'qa-cands' }, candidates.map((candidate) => h('div', {
+          className: 'qa-cand',
+          key: candidate.source,
+          'data-active': candidate.active ? 'true' : 'false',
+          'data-empty': candidate.path ? 'false' : 'true',
+        },
+          h('span', { className: 'qa-cand-src' }, t(`store.source.${candidate.source}`)),
+          h('span', { className: 'qa-cand-path', title: candidate.path || '' },
+            candidate.path || t('store.unset')),
+          candidate.active ? h('span', { className: 'qa-cand-badge' }, t('store.active')) : null
+        )))
+        : null,
+      info && info.legacyVisible
+        ? h('span', { className: 'qa-hint' }, t('store.legacy', { path: info.legacyPath }))
+        : null,
+      pinned ? h('span', { className: 'qa-hint' }, t('store.pinned')) : null,
+      info && !info.exists && info.source !== 'home' && !info.legacyVisible
+        ? h('span', { className: 'qa-hint' }, t('store.newFile'))
+        : null,
+      editable
+        ? h('div', { className: 'qa-store-row' },
+          h('input', {
+            className: 'qa-input',
+            value,
+            placeholder: t('store.placeholder'),
+            'aria-label': t('store.custom'),
+            onChange: (event) => setDraft(event.target.value),
+            onKeyDown: (event) => { if (event.key === 'Enter' && dirty && !store.storeBusy) submit(trimmed); },
+          }),
+          h('button', {
+            className: 'qa-act',
+            'data-kind': 'primary',
+            disabled: store.storeBusy || !dirty || invalid,
+            onClick: () => submit(trimmed),
+          }, store.storeBusy ? t('config.saving') : t('store.save')),
+          h('button', {
+            className: 'qa-act',
+            disabled: store.storeBusy || !configRaw,
+            onClick: () => submit(''),
+          }, t('store.clear'))
+        )
+        : null,
+      store.storeError ? h('span', { className: 'qa-error' }, store.storeError) : null,
+      store.storeFlash ? h('span', { className: 'qa-flash' }, t('store.saved')) : null
+    );
+  }
+
   function ConfigPanel({ t }) {
     useStore();
     const config = store.config;
@@ -1039,9 +1211,16 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       if (!store.config) loadConfig().catch(() => {});
     }, []);
 
+    // Seed the editable rows once, then again only when the store moves —
+    // a routine refetch (opening the panel) must not discard unsaved edits.
+    const seededEpoch = React.useRef(-1);
     React.useEffect(() => {
-      if (rows === null && store.config) setRows(store.config.buttons.map((button) => ({ ...button })));
-    }, [rows, store.config]);
+      if (!store.config) return;
+      if (rows === null || seededEpoch.current !== store.configEpoch) {
+        seededEpoch.current = store.configEpoch;
+        setRows(store.config.buttons.map((button) => ({ ...button })));
+      }
+    }, [rows, store.config, store.configEpoch]);
 
     const setField = (field, value) => setForm((current) => (current ? { ...current, [field]: value } : current));
 
@@ -1328,7 +1507,8 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
                   h('span', { className: 'qa-row-meta' }, `${t(`scope.${row.scope || 'global'}`)} · ${row.command}`)
                 )
               )))
-            : null
+            : null,
+          h(StoreSection, { t, config })
         ),
         h('div', { className: 'qa-modal-foot' },
           h('span', { className: 'qa-hint' },

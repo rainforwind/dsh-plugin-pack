@@ -1,6 +1,6 @@
 {
   "name": "dsh-quick-actions",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Configurable quick-action buttons in the DSH UI: run shell commands with live output, scoped per session, workspace, or globally.",
   "type": "module",
   "main": "lib/index.js",
