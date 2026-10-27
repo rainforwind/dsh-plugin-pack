@@ -105,6 +105,12 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     'field.target': 'Applies to',
     'field.idHint': 'Lowercase letters, digits, - _ . — the button’s identity',
     'field.workdirHint': 'Empty = run in the workspace directory',
+    'field.sandbox': 'File sandbox',
+    'field.sandboxHint': 'Inherit follows the host default; the write root is always the button workdir.',
+    'sandbox.inherit': 'Inherit from the host',
+    'sandbox.read-only': 'read-only',
+    'sandbox.workspace-write': 'workspace-write',
+    'sandbox.danger-full-access': 'danger-full-access — writes anywhere',
     'field.commandHint': 'Supports the {workspace} and {session} placeholders',
     'params.section': 'Parameters',
     'params.hint': 'Collected in the card when it opens; {name} in the command.',
@@ -205,6 +211,12 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
     'field.target': '限定于',
     'field.idHint': '小写字母、数字、- _ .，作为按钮的唯一标识',
     'field.workdirHint': '留空则在 workspace 目录中执行',
+    'field.sandbox': '文件沙箱',
+    'field.sandboxHint': '「继承」跟随宿主默认；可写根始终是按钮自己的工作目录。',
+    'sandbox.inherit': '继承宿主默认',
+    'sandbox.read-only': '只读',
+    'sandbox.workspace-write': '仅工作目录可写',
+    'sandbox.danger-full-access': '任意位置可写（危险）',
     'field.commandHint': '支持 {workspace} 与 {session} 占位符',
     'params.section': '参数',
     'params.hint': '展开卡片时填写，命令里用 {name} 引用。',
@@ -1119,7 +1131,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     return [];
   }
 
-  const blankForm = () => ({ index: -1, id: '', label: '', icon: '', command: '', workdir: '', scope: 'global', target: '', params: [] });
+  const blankForm = () => ({ index: -1, id: '', label: '', icon: '', command: '', workdir: '', scope: 'global', target: '', sandbox: '', params: [] });
 
   // Where the store lives, and why. The host sends the resolution chain it
   // actually walked, so this panel never re-implements the precedence rules —
@@ -1253,6 +1265,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
         target: form.scope === 'global' ? '' : (form.target || ''),
         workdir: (form.workdir || '').trim(),
         icon: (form.icon || '').trim(),
+        sandbox: (form.sandbox || '').trim(),
         params: (form.params || []).map((def) => ({
           name: def.name.trim(),
           required: !!def.required,
@@ -1279,6 +1292,7 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
         icon: source.icon || '',
         command: source.command,
         workdir: source.workdir || '',
+        sandbox: source.sandbox || '',
         scope: source.scope || 'global',
         target: source.target || '',
         params: (source.params || []).map((def) => ({ ...def })),
@@ -1458,6 +1472,18 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
                 onChange: (event) => setField('workdir', event.target.value),
               }),
               h('span', { className: 'qa-fieldhint' }, t('field.workdirHint'))
+            ),
+            h('div', { className: 'qa-field' },
+              h('span', { className: 'qa-fieldlabel' }, t('field.sandbox')),
+              h('select', {
+                className: 'qa-input',
+                value: form.sandbox || '',
+                onChange: (event) => setField('sandbox', event.target.value),
+              }, ['', 'read-only', 'workspace-write', 'danger-full-access'].map((mode) => h('option', {
+                key: mode || 'inherit',
+                value: mode,
+              }, mode ? t(`sandbox.${mode}`) : t('sandbox.inherit')))),
+              h('span', { className: 'qa-fieldhint' }, t('field.sandboxHint'))
             ),
             h('div', { style: { display: 'flex', gap: '8px' } },
               h('div', { className: 'qa-field', style: { flex: '1' } },

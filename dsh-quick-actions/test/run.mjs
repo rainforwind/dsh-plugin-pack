@@ -36,7 +36,15 @@ function makeShell() {
   return {
     executions,
     resolve(request) {
-      return { ...request, timeoutMs: 0, stdoutMaxBytes: 1024, onExpiry: request.onExpiry || 'none' }
+      // bash-local fills `workdir` from its own config cwd, then process.cwd();
+      // the stub keeps that shape so policy alignment is testable.
+      return {
+        ...request,
+        workdir: request.workdir ?? '/shell-cwd',
+        timeoutMs: 0,
+        stdoutMaxBytes: 1024,
+        onExpiry: request.onExpiry || 'none',
+      }
     },
     async execute(spec) {
       const streams = { stdout: '', stderr: '' }
@@ -69,7 +77,7 @@ function makeShell() {
 // workspaces: [{ id, path, sessionIds }] rows for the registry stub.
 // profileContext: the Host service that names the running profile; omitted by
 // default so every existing case keeps exercising the compat path.
-function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs = {}, profileContext, configEditor } = {}) {
+function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs = {}, profileContext, configEditor, sandboxPolicy } = {}) {
   const routes = new Map()
   const webServer = {
     register(route) {
@@ -94,6 +102,7 @@ function makeHost({ shell, workspaces = [], storePath, config = {}, sessionDirs 
       if (service === 'agents') return agents
       if (service === 'profileContext') return profileContext
       if (service === 'configEditor') return configEditor
+      if (service === 'sandboxPolicy') return sandboxPolicy
       return undefined
     },
     on() {},
@@ -935,6 +944,121 @@ await test('a path that would break the settings document is rejected', async ()
   }
   assert.ok(!existsSync(join(p1, 'dsh-quick-actions.settings.json')))
   rmSync(root, { recursive: true, force: true })
+})
+
+// ── sandbox policy of a quick action ───────────────────────────────────────
+
+// A quick action is agentless: `ctx.shell` would otherwise hand it the
+// deployment's fallback policy, whose workspace-write root is the host launch
+// directory (the profile dir). That is why git could not lock .git even though
+// the command ran inside the repository.
+const makePolicy = (mode = 'workspace-write', root = '/Users/me/.dsh/profiles/web') => ({
+  calls: [],
+  resolve() {
+    this.calls.push(true)
+    return { mode, workspaceRoot: root }
+  },
+})
+
+await test('the sandbox boundary follows the button workdir', async () => {
+  const shell = makeShell()
+  const policy = makePolicy()
+  const host = makeHost({
+    shell,
+    sandboxPolicy: policy,
+    profileContext: { name: 'web', dir: '/Users/me/.dsh/profiles/web' },
+    config: { buttons: [{ id: 'commit', label: 'Commit', command: 'git commit -m x', scope: 'global', workdir: '/proj/repo' }] },
+  })
+
+  await startRun(host.routes, 'commit', 'ses-1')
+  const spec = shell.executions[0].spec
+  assert.deepEqual(spec.sandboxPolicy, { mode: 'workspace-write', workspaceRoot: '/proj/repo' },
+    'the root must be the button workdir, not the deployment fallback')
+  assert.equal(policy.calls.length, 1, 'the deployment mode should come from the policy service')
+  shell.executions[0].finish(0)
+  await flush()
+})
+
+await test('without a button workdir the boundary follows the shell cwd', async () => {
+  const shell = makeShell()
+  const host = makeHost({
+    shell,
+    sandboxPolicy: makePolicy('workspace-write', '/Users/me/.dsh/profiles/web'),
+    config: { buttons: [{ id: 'free', label: 'Free', command: 'echo hi', scope: 'global' }] },
+  })
+
+  await startRun(host.routes, 'free', 'ses-1')
+  assert.equal(shell.executions[0].spec.sandboxPolicy.workspaceRoot, '/shell-cwd',
+    'the policy must match the directory the command actually spawns in')
+  shell.executions[0].finish(0)
+  await flush()
+})
+
+await test('a button can ask for a wider sandbox explicitly', async () => {
+  const shell = makeShell()
+  const host = makeHost({
+    shell,
+    sandboxPolicy: makePolicy('read-only'),
+    config: {
+      buttons: [
+        { id: 'escape', label: 'Escape', command: 'cp a ~/Downloads/', scope: 'global', workdir: '/proj/repo', sandbox: 'danger-full-access' },
+      ],
+    },
+  })
+
+  await startRun(host.routes, 'escape', 'ses-1')
+  assert.equal(shell.executions[0].spec.sandboxPolicy.mode, 'danger-full-access',
+    'the explicit per-button mode must win over the deployment default')
+  shell.executions[0].finish(0)
+  await flush()
+})
+
+await test('the deployment mode is kept when the button says nothing', async () => {
+  const shell = makeShell()
+  const host = makeHost({
+    shell,
+    sandboxPolicy: makePolicy('read-only'),
+    config: { buttons: [{ id: 'ro', label: 'RO', command: 'echo hi', scope: 'global', workdir: '/proj/repo' }] },
+  })
+
+  await startRun(host.routes, 'ro', 'ses-1')
+  assert.equal(shell.executions[0].spec.sandboxPolicy.mode, 'read-only',
+    'a read-only deployment must not be silently widened')
+  shell.executions[0].finish(0)
+  await flush()
+})
+
+await test('a host without a policy service keeps the old behaviour', async () => {
+  const shell = makeShell()
+  const host = makeHost({
+    shell,
+    config: { buttons: [{ id: 'plain', label: 'Plain', command: 'echo hi', scope: 'global', workdir: '/proj/repo' }] },
+  })
+
+  await startRun(host.routes, 'plain', 'ses-1')
+  assert.equal(shell.executions[0].spec.sandboxPolicy, undefined,
+    'nothing may be invented when the host has no policy service')
+  shell.executions[0].finish(0)
+  await flush()
+})
+
+await test('an unknown sandbox mode is rejected and survives a round trip', async () => {
+  const shell = makeShell()
+  const path = join(mkdtempSync(join(tmpdir(), 'qa-sandbox-')), 'buttons.json')
+  const host = makeHost({ shell, storePath: path })
+
+  const bad = await postConfig(host.routes, [
+    { id: 'x', label: 'x', command: 'echo', scope: 'global', sandbox: 'root' },
+  ])
+  assert.equal(bad.status, 400)
+  assert.match(bad.body.errors[0], /sandbox: expected inherit\|read-only\|workspace-write\|danger-full-access/)
+
+  const saved = await postConfig(host.routes, [
+    { id: 'y', label: 'y', command: 'echo', scope: 'global', sandbox: 'danger-full-access' },
+  ])
+  assert.equal(saved.status, 200)
+  assert.equal(saved.body.buttons[0].sandbox, 'danger-full-access')
+  rmSync(join(path, '..'), { recursive: true, force: true })
 })
 
 // leave the temp store behind for OS cleanup

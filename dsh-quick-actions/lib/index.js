@@ -21,7 +21,7 @@
 // that the HTTP routes hand to every viewer of that instance.
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve as resolvePath } from 'node:path'
 
 const name = 'dsh-quick-actions'
 const inject = ['webServer']
@@ -37,6 +37,12 @@ const MAX_ICON = 8
 const PARAM_NAME = /^[A-Za-z][A-Za-z0-9_]{0,31}$/
 const MAX_PARAM_VALUE = 2000
 const MAX_PARAMS = 8
+// A button runs without a session, so `ctx.shell` would fall back to the
+// deployment's sandbox root — the host's launch directory, not the project the
+// button works in. Every write inside .git was denied there. The policy is now
+// aligned with the resolved workdir; this field is the explicit escape hatch
+// for a button that really must write further out.
+const SANDBOX_MODES = ['inherit', 'read-only', 'workspace-write', 'danger-full-access']
 
 const STORE_FILE = 'dsh-quick-actions.json'
 const SETTINGS_FILE = 'dsh-quick-actions.settings.json'
@@ -164,6 +170,10 @@ function validateButton(raw, where, reserved, seen) {
   if (workdir.length > MAX_PATH_FIELD) return { error: `${where}.workdir: at most ${MAX_PATH_FIELD} characters` }
   const icon = typeof raw.icon === 'string' ? raw.icon.trim() : ''
   if (icon.length > MAX_ICON) return { error: `${where}.icon: at most ${MAX_ICON} characters` }
+  const sandbox = typeof raw.sandbox === 'string' ? raw.sandbox.trim() : ''
+  if (sandbox && !SANDBOX_MODES.includes(sandbox)) {
+    return { error: `${where}.sandbox: expected ${SANDBOX_MODES.join('|')}` }
+  }
   let params
   try {
     params = validateParams(raw.params, where)
@@ -171,7 +181,7 @@ function validateButton(raw, where, reserved, seen) {
     return { error: error.message }
   }
   if (params.error) return params
-  return { value: { id, label, command, scope, target, workdir, icon, params: params.value } }
+  return { value: { id, label, command, scope, target, workdir, icon, sandbox, params: params.value } }
 }
 
 // Validate a whole list, keeping entry order (it is the strip's display order).
@@ -499,6 +509,29 @@ function apply(ctx, config = {}) {
     return shell
   }
 
+  // A quick action is an agentless shell call, so `ctx.shell` gives it the
+  // deployment's fallback policy — and for calls without a session that root is
+  // the host's launch directory (the profile dir), not the project. Git then
+  // fails to lock .git even though the command runs inside the repository.
+  // Align the boundary with the directory the command actually runs in, and
+  // keep the deployment's mode unless the button asks for a different one.
+  function sandboxPolicyFor(spec, button) {
+    const fromConfig = typeof config.sandbox === 'string' ? config.sandbox.trim() : ''
+    const requested = (button && button.sandbox) || fromConfig
+    let mode = requested && requested !== 'inherit' && SANDBOX_MODES.includes(requested) ? requested : ''
+    if (!mode) {
+      const policy = ctx.get('sandboxPolicy')
+      if (policy && typeof policy.resolve === 'function') {
+        try { mode = policy.resolve().mode || '' } catch (error) { mode = '' }
+      }
+    }
+    if (!mode) return null
+    // The root must be absolute; `spec.workdir` already carries every fallback,
+    // so it is the one directory guaranteed to match the spawn.
+    const root = resolvePath(spec.workdir || process.cwd())
+    return { mode, workspaceRoot: root }
+  }
+
   // Start a run for `button`'s instance, or join the one already running:
   // the shared instance is the whole point of scope, so two viewers clicking
   // the same button get the same execution and the same output.
@@ -542,7 +575,15 @@ function apply(ctx, config = {}) {
     try {
       const request = { command, onExpiry: 'none' }
       if (workdir) request.workdir = workdir
-      const exec = await shell.execute(shell.resolve(request))
+      const spec = shell.resolve(request)
+      // Resolve FIRST, then align the boundary with `spec.workdir`: that is the
+      // directory the command really runs in, after every fallback
+      // (button workdir -> config.workdir -> shell config cwd -> process.cwd()).
+      // Without this the sandbox falls back to the deployment root, which for an
+      // agentless call is the host's launch directory.
+      const policy = sandboxPolicyFor(spec, button)
+      if (policy) spec.sandboxPolicy = policy
+      const exec = await shell.execute(spec)
       record.exec = exec
       record.timer = setInterval(() => pump(record), pollMs)
       timers.add(record.timer)

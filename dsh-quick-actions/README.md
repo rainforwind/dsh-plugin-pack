@@ -37,6 +37,7 @@ JSON store 的位置按下面的顺序解析，**第一个有值的生效**（�
   icon: '🧹'         # 可选，1-8 字符（emoji）
   command: rm -rf {workspace}/dist   # 必填；支持 {workspace}、{session} 占位符
   workdir: /srv/app  # 可选；缺省时依次取 config.workdir → workspace 目录
+  sandbox: inherit   # 可选；inherit | read-only | workspace-write | danger-full-access
   scope: workspace   # global | workspace | session，默认 global
   target: ws-a       # 可选，钉死到某个 workspace id / session id
   params:            # 可选，运行时参数（最多 8 个）
@@ -87,6 +88,7 @@ JSON store 的位置按下面的顺序解析，**第一个有值的生效**（�
 - **workspace**：`ctx.get('workspaceRegistry').list()` 返回实体，用 `entity.sessionIds` 反查会话所属 workspace，取 `entity.id` / `entity.path`。这个 getter **已被持久化的 header 索引过滤**，所以刚建的会话还不在任何列表里——此时退回 `workingDirectory.get(agent.session)` 拿它自己的目录，再按目录前缀匹配 workspace；仍匹配不上就把该目录当作 `{workspace}`。这一步是必要的：`workdir` 为空串时 `ctx.shell.resolve()` 会退到 `process.cwd()`（dsh 进程的启动目录，见 `dsh-bash-local` 的 `resolve` 契约），命令就会跑在会话目录之外——`{workspace}` 也展不开。未分组会话的实例键带上会话 id（`w:<id>:~<sessionId>`），避免多个无 workspace 的会话共用一次运行。服务缺席时会话视为未分组（workspace 相关 target 不命中，无 target 的照常可见）。
 - **agents**：`ctx.get('agents').get(sessionId)` 取活着的 agent，用于把 id 换成 `workingDirectory.get()` 需要的 session 对象；没有活 agent 时跳过这层兜底。
 - **shell**：`ctx.shell.resolve(request)` → `ctx.shell.execute(spec)`，读输出走 `exec.observed[channel].readFrom(offset)`（`{ text, nextOffset, lossy }`），`exec.done` 只 resolve 不 reject。
+- **sandboxPolicy**：`ctx.get('sandboxPolicy').resolve()` 给出部署默认的 `mode`。**快捷按钮是没有 session 的 agentless 调用**，这类调用的 `workspace-write` 根取部署兜底（默认 `process.cwd()`，即宿主启动目录 profile dir），于是 `.git` 锁文件写不进去、`git commit` 报错——即使命令其实跑在仓库里。所以这里在 `shell.resolve()` **之后**用 `spec.workdir`（已含全部兜底）作为 `workspaceRoot`，模式默认沿用部署值，按钮可用 `sandbox` 显式覆盖。根必须是绝对路径（策略服务会校验），故 `resolve(spec.workdir)`。没有该服务时不注入策略，行为与旧版一致。
 - **客户端服务**：`slots` / `sessions` / `workspaces`（配置面板的 workspace 下拉：`workspaces.list.getSnapshot().items`）/ `locale`（`ctx.locale.register(NS, { zh, en })`，缺席时回退到按 `navigator.language` 选的内置词典）。全部可选，缺席即降级。
 - **timer（硬依赖）**：客户端半区跑在受限 context 上，`ctx.interval` 只对声明了 `inject: ['slots', 'timer', 'locale']` 的 fiber 放行——未声明就调用是同步抛错，会让整个页面启动失败（`web boot: N entries did not activate / dsh-quick-actions: failed`）。3s 上下文轮询与 popover 的 700ms 轮询都走 `ctx.interval`，所以 `timer` 必须留在 inject 里，不能当可选项。
 - **locale（同等重要）**：受限 context 上 `ctx.get('locale')` 只对声明过的服务返回东西。`locale` 不在 `inject` 里时字典注册静默不执行，槽位规范里的 `locale: NS` 仍会让宿主传一个 `t`，但它解析不了我们的命名空间、把 key 原样吐回来——界面就会出现 `pop.rerun`、`status.exit0` 这种字面量。所以 `locale` 必须在 `inject` 里，并且组件侧再兜一层：宿主 `t` 返回的字符串等于 key 时改用本地词典，任何情况下都不让原始 key 上屏。
@@ -122,7 +124,7 @@ node test/run.mjs      # Host 半：scope 可见性/实例共享、执行生命�
 node test/client.mjs   # 浏览器半：槽位注册、按钮拉取、运行与 popover 输出、放大面板、「+」配置面板增删保存、失败提示、Esc
 ```
 
-覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；参数：必填缺失在 shell 启动前拒绝（400 `missing-param:<name>`）、值替换与回显、未知参数键丢弃、定义经 config 落盘往返、非法/重名参数的字段级报错；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换；参数：带参按钮点芯片即运行并复用卡片里填过的值、默认值以 placeholder 呈现、卡片填值后 POST 携带 `params`、管理面板可声明参数行、保存后重开参数仍在；以及新建会话（尚未进 header 索引）按自身目录解析 workspace、未分组会话实例不互相串味；store 位置：profile 优先于被污染的 `DSH_PROFILE_DIR`、无 `profileContext` 时走 env、显式 `storePath` 最高优先、profile 文件缺失时只读 legacy 且首次保存写 profile 路径、profile 文件存在时不合并 legacy；面板：候选链渲染与生效项标记、面板覆盖即时切换并落盘到 settings、清除覆盖回到 profile、被 patch 固定时隐藏输入框、危险路径被拒；宿主 `t` 解析不了命名空间时界面不漏出原始 locale key。
+覆盖：三种 scope × 有无 target 的可见性矩阵（含未分组会话、无会话上下文）、全局/按 workspace/按会话三种实例键的共享与隔离、启动-加入-泵输出-落定-停止的完整链路、shell 缺失与不可见按钮的拒绝、`{workspace}`/`{session}` 展开与保留、超上限从头部裁剪、config 端点对 id/label/scope/预留 id 的校验、写盘与重启回读、删除按钮时清理其运行记录；参数：必填缺失在 shell 启动前拒绝（400 `missing-param:<name>`）、值替换与回显、未知参数键丢弃、定义经 config 落盘往返、非法/重名参数的字段级报错；客户端在打桩的 `window.__ModuleLoader__` 下装配，覆盖三个槽位注册、字典注册、按会话拉取、点击运行后 popover 的实时输出、Expand/Esc、配置面板从建条目到保存落盘、启动失败原因回显、侧边栏跟随当前会话切换；参数：带参按钮点芯片即运行并复用卡片里填过的值、默认值以 placeholder 呈现、卡片填值后 POST 携带 `params`、管理面板可声明参数行、保存后重开参数仍在；以及新建会话（尚未进 header 索引）按自身目录解析 workspace、未分组会话实例不互相串味；store 位置：profile 优先于被污染的 `DSH_PROFILE_DIR`、无 `profileContext` 时走 env、显式 `storePath` 最高优先、profile 文件缺失时只读 legacy 且首次保存写 profile 路径、profile 文件存在时不合并 legacy；沙箱：策略根跟随按钮 workdir（缺省则跟随 shell cwd）、按钮可显式放宽、只读部署不被悄悄放宽、无策略服务时不注入、非法模式被拒并往返保存；面板：候选链渲染与生效项标记、面板覆盖即时切换并落盘到 settings、清除覆盖回到 profile、被 patch 固定时隐藏输入框、危险路径被拒；宿主 `t` 解析不了命名空间时界面不漏出原始 locale key。
 
 ## 卸载
 

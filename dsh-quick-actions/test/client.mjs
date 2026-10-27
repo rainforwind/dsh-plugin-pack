@@ -1105,5 +1105,54 @@ await test('a path pinned by cordis.patch.yml hides the field and says why', asy
   storeInfo = makeStoreInfo();
 });
 
+await test('the form declares a file sandbox and saves it', async () => {
+  // This case appends a row to the shared store; put it back afterwards so the
+  // following cases keep the two-button fixture they assume.
+  const storeBefore = configStore;
+  try {
+    const plus = buttonByText(header, '+');
+    await plus.props.onClick();
+    await flush();
+    renderSlot('shell.overlay');
+
+    await buttonByText(renderSlot('shell.overlay'), 'Add button').props.onClick();
+    let view = renderSlot('shell.overlay');
+
+    const sandbox = findAll(view, (node) => node.type === 'select'
+      && textOf(node).includes('Inherit from the host'))[0];
+    assert.ok(sandbox, 'the sandbox select is missing');
+    assert.ok(textOf(view).includes('danger-full-access'), 'every mode should be offered');
+
+    await sandbox.props.onChange({ target: { value: 'danger-full-access' } });
+    view = renderSlot('shell.overlay');
+    const labelInput = findAll(view, (node) => node.type === 'input')[0];
+    await labelInput.props.onChange({ target: { value: 'Escape hatch' } });
+    view = renderSlot('shell.overlay');
+    const textarea = findAll(view, (node) => node.type === 'textarea')[0];
+    await textarea.props.onChange({ target: { value: 'cp a ~/Downloads/' } });
+    view = renderSlot('shell.overlay');
+
+    // "Add to list" stages the row; "Save changes" is what persists it.
+    await buttonByText(view, 'Add to list').props.onClick();
+    await flush();
+    await buttonByText(renderSlot('shell.overlay'), 'Save changes').props.onClick();
+    await flush();
+
+    const posted = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/config'));
+    const saved = JSON.parse(posted[posted.length - 1].body);
+    const row = saved.buttons.find((b) => b.label === 'Escape hatch');
+    assert.ok(row, 'the drafted button was not saved');
+    assert.equal(row.sandbox, 'danger-full-access', 'the chosen mode must reach the store');
+  } finally {
+    configStore = storeBefore;
+    // Leave no overlay behind: the Escape handler closes the overlay before the
+    // popover, so a stray one would break the keyboard case that follows.
+    const panel = renderSlot('shell.overlay');
+    const close = panel ? findAll(panel, (n) => n.props && n.props.className === 'qa-iconbtn'
+      && n.props['aria-label'] === 'Close')[0] : null;
+    if (close) { await close.props.onClick(); await flush(); }
+  }
+});
+
 console.log(`\n${String(passed)} passed, ${String(failures.length)} failed`)
 process.exit(failures.length > 0 ? 1 : 0)
