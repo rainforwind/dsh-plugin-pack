@@ -1,11 +1,11 @@
 {
   "name": "dsh-session-manager",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Archived-session management for DSH: permanent delete entry for archived sessions (sidebar menu + agent tool), with ghost-residue cleanup, residency diagnostics, and a force escape hatch for resident idle sessions.",
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
-    "test": "node test/core.test.mjs"
+    "test": "node test/core.test.mjs && node test/client.test.mjs"
   },
   "meta": {
     "title": "Session Manager",

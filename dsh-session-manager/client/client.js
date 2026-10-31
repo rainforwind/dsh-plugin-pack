@@ -16,7 +16,13 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
   const h = React.createElement
 
   const NS = 'dsh-session-manager'
-  const inject = ['slots']
+  // `locale` is declared, not optional: the restricted client context only
+  // exposes services a fiber injects, so without it ctx.get('locale') returns
+  // undefined, the dictionaries never reach the registry, and every slot
+  // translator bound to this namespace echoes raw keys ("confirm.title"). The
+  // shared `common` namespace still answers `cancel`, which is why that one
+  // string looked translated while the rest leaked.
+  const inject = ['slots', 'locale']
 
   // ── locale ───────────────────────────────────────────────────────────────
 
@@ -80,6 +86,21 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     'toast.dismiss': '关闭',
   }
 
+  function substitute(text, params) {
+    if (!params) return text
+    for (const name of Object.keys(params)) {
+      text = text.split('{' + name + '}').join(String(params[name]))
+    }
+    return text
+  }
+
+  function makeT(dict) {
+    return (key, params) => substitute(
+      Object.prototype.hasOwnProperty.call(dict, key) ? dict[key] : key,
+      params,
+    )
+  }
+
   function preferredDict() {
     try {
       const languages = (typeof navigator !== 'undefined' && (navigator.languages || [navigator.language])) || []
@@ -90,20 +111,40 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     return en
   }
 
-  function makeT(dict) {
-    return (key, params) => {
-      let text = Object.prototype.hasOwnProperty.call(dict, key) ? dict[key] : key
-      if (params) {
-        for (const name of Object.keys(params)) {
-          text = text.split('{' + name + '}').join(String(params[name]))
-        }
-      }
-      return text
+  // Fallback when the locale service does not hand the component a `t`, and the
+  // safety net when it does hand one that cannot resolve our namespace.
+  const fallbackT = makeT(preferredDict())
+
+  // Set by apply() from the locale service's bound translator: it follows the
+  // app's language preference, which navigator.language cannot.
+  let boundT = null
+
+  // Resolve a key through the host first, then our own dictionary. A namespace
+  // that never reached the registry resolves every key to itself, so "same
+  // string back" counts as a miss — a raw `confirm.title` must never reach the UI.
+  function resolveText(key, params) {
+    let text
+    if (boundT) {
+      try { text = boundT(key, params) } catch (error) { text = undefined }
     }
+    if (text == null || text === '' || text === key) return fallbackT(key, params)
+    return String(text)
   }
 
-  // Fallback when the locale service does not hand the component a `t`.
-  const localT = makeT(preferredDict())
+  const localT = (key, params) => resolveText(key, params)
+
+  // The slot's `locale: NS` makes the host pass a translator bound to this
+  // namespace; keep the same safety net on it, so a dict that arrived late (or
+  // not at all) degrades to legible copy instead of literal keys.
+  function composeT(tProp) {
+    if (typeof tProp !== 'function') return localT
+    return (key, params) => {
+      let text
+      try { text = tProp(key, params) } catch (error) { text = undefined }
+      if (text == null || text === '' || text === key) return localT(key, params)
+      return String(text)
+    }
+  }
 
   // ── tiny observable (getSnapshot/subscribe, uSES-compatible) ──────────────
 
@@ -236,7 +277,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
       return () => { alive = false; if (controller) controller.abort() }
     }, [sessionId])
     if (!state || !state.archived) return null
-    const tFn = t || localT
+    const tFn = composeT(t)
     return h('div', { className: 'sm-wrap' },
       h(Styles),
       h('div', { className: 'sm-sep', role: 'separator' }),
@@ -263,7 +304,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
     const [parentSession, setParentSession] = React.useState(undefined)
     const cancelRef = React.useRef(null)
     const restoreRef = React.useRef(null)
-    const tFn = t || localT
+    const tFn = composeT(t)
     React.useEffect(() => {
       if (!pending) return undefined
       setDeleting(false)
@@ -377,7 +418,7 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
       return () => clearTimeout(timerRef.current)
     }, [notice, dismissToast])
     if (!notice) return null
-    const tFn = t || localT
+    const tFn = composeT(t)
     return h('div', { className: 'sm-toast', 'data-kind': notice.forced ? 'warn' : 'info', role: 'status', 'aria-live': 'polite' },
       h(Styles),
       h('button', {
@@ -396,11 +437,30 @@ window.__ModuleLoader__.load({ id: 'dsh-session-manager', factory: (require) => 
       return
     }
 
-    const locale = ctx.get('locale')
+    // `locale` is in `inject`, so the service face is on ctx; `get` stays as a
+    // tolerant second path for older compositions. Without the service the
+    // dictionaries never register and the slot translator (bound to NS by the
+    // registration below) falls through to `common` — which only knows
+    // `cancel`, so every other string renders as its key.
+    const locale = ctx.locale || ctx.get('locale')
     if (locale && typeof locale.register === 'function') {
       try {
-        ctx.effect(() => locale.register(NS, { en, zh }), 'dsh-session-manager: dictionaries')
+        ctx.effect(() => {
+          const dispose = locale.register(NS, { en, zh })
+          let unbind
+          if (typeof locale.bind === 'function') {
+            // A bound translator follows the active app language (and switches
+            // with it), which navigator.language cannot.
+            try {
+              const bound = locale.bind(NS)
+              if (typeof bound === 'function') { boundT = bound; unbind = () => { boundT = null } }
+            } catch (error) { console.log('[session-manager] locale bind failed:', String(error)) }
+          }
+          return () => { if (unbind) unbind(); if (typeof dispose === 'function') dispose() }
+        }, 'dsh-session-manager: dictionaries')
       } catch (error) { console.log('[session-manager] locale registration failed:', String(error)) }
+    } else {
+      console.log('[session-manager] locale service unavailable; using the built-in dictionaries')
     }
 
     // One pending request links the menu row to the overlay dialog.

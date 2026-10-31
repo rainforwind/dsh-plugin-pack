@@ -65,3 +65,29 @@ removed，把归档条目和行一起清掉。删除入口的门禁只看 `archi
 
 - 需要 `dsh-session-persistence-jsonl` 后端（读取其 `root`）；其他后端会明确拒绝。
 - 删除不可撤销；建议配合 DSH 备份/快照使用。
+
+## 客户端 locale（易踩的坑）
+
+浏览器半区的 `inject` 必须是 `['slots', 'locale']`。受限的客户端 context 只把
+**在 inject 里声明过**的服务放行，所以 `locale` 缺席时 `ctx.get('locale')` 拿到
+`undefined`：字典从未注册，而槽位注册里的 `locale: NS` 仍让宿主传一个绑定到本
+命名空间的 `t`。这个 `t` 解析不到我们的字典时会回落到共享的 `common` 命名空间，
+而 `common` 里恰好只有 `cancel` —— 结果就是确认框里「Cancel」是正常文案、其余全是
+`confirm.title` / `confirm.desc` / `err.resident` 这样的原始 key。
+
+修法有两层，缺一不可：
+
+1. `inject` 声明 `locale`，用 `ctx.locale`（保留 `ctx.get('locale')` 作为兼容路径）
+   注册双语字典，并用 `locale.bind(NS)` 拿到跟随**应用语言**（而非
+   `navigator.language`）的翻译器；
+2. 组件侧统一走 `composeT(t)` / `localT`：宿主 `t` 返回的字符串等于 key 时视为
+   未命中，改用内置词典，任何情况下都不让原始 key 上屏（字典注册失败、晚到或
+   宿主换了命名空间都能降级成可读文案）。
+
+`test/client.test.mjs` 用「只会翻译 cancel 的假宿主翻译器」复现了这个现场，并断言
+菜单项、确认框、驻留拒绝、强制删除提示里都不出现原始 key；旧版客户端会失败。
+
+```bash
+node test/core.test.mjs    # Host 半：删除核心 / 幽灵残留 / 驻留与活动
+node test/client.test.mjs  # 浏览器半：locale 注册、文案解析、强制删除链路
+```
