@@ -77,6 +77,7 @@ JSON store 的位置按下面的顺序解析，**第一个有值的生效**（�
 - 命令通过 `ctx.shell` 执行（`onExpiry: 'none'`，无内建超时）；宿主从句柄的**非消费式** `observed.stdout/stderr` reader 按 `pollMs`（默认 150ms）泵入内存缓冲，`done` 落定时按退出码判定 `completed` / `failed` / `killed`。
 - 每个实例只保留**最新一次**运行；输出超过 `maxOutputChars`（默认 200000）时从头部裁剪并留下 `…[earlier output dropped]` 标记，裁掉的字符数回传给界面。
 - 界面侧：点按钮 = 运行（或加入共享实例）并弹出 **popover**，700ms 轮询实时输出、贴底自动滚动；「⤢」一键放大到 `shell.overlay` 里的**大面板**，长输出更舒展。运行中可 Stop，结束后可 Run again；Esc 关闭，点外面也关闭。
+- 小卡片也渲染在 `shell.overlay`，不放在 header/sidebar 按钮条内部：desktop 的 header actions 会裁剪溢出，单独提高 z-index 无法解决。卡片用按钮条自身的 viewport rect 定位；窗口缩放、滚动和按钮条尺寸变化时更新，靠近边缘时限宽/翻转。卡片内部点击不关闭，切换会话或卸载来源按钮条时清理。
 - `ctx.shell` 缺失时运行请求返回 `shell-unavailable`（503），原因会显示在 popover 里，插件本身照常加载。
 
 ## 依赖的 DSH 接口

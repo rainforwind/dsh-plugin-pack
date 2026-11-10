@@ -40,6 +40,12 @@ globalThis.document = {
 }
 globalThis.window = {
   __ModuleLoader__: { load(mod) { loaded = mod } },
+  innerWidth: 1000, innerHeight: 700,
+  addEventListener(type, fn) { docListeners.push({ type, fn }); },
+  removeEventListener(type, fn) {
+    const i = docListeners.findIndex((l) => l.type === type && l.fn === fn);
+    if (i >= 0) docListeners.splice(i, 1);
+  },
 }
 
 // ── stub React: real hook semantics per component instance ─────────────────
@@ -59,7 +65,7 @@ const React = {
   useState(initial) {
     const inst = currentInst;
     const i = inst.cursor++;
-    if (!(i in inst.state)) inst.state[i] = initial;
+    if (!(i in inst.state)) inst.state[i] = typeof initial === 'function' ? initial() : initial;
     const setter = (value) => { inst.state[i] = typeof value === 'function' ? value(inst.state[i]) : value; };
     return [inst.state[i], setter];
   },
@@ -344,26 +350,11 @@ await test('the header strip fetches buttons for its own session', async () => {
   assert.match(fetchCalls[0].url, /\/quick-actions\/buttons\?sessionId=ses-1$/);
 });
 
-// The sidebar strip sits at the screen's left edge; a right-anchored 440px card
-// slides under the app rail and gets clipped. The sidebar variant must anchor
-// its popover left so the card grows into the chat area instead.
-await test('the sidebar popover anchors left so it stays on screen', async () => {
-  const styles = findAll(header, (node) => node.type === 'style');
-  assert.ok(styles.length > 0, 'no style node was rendered');
-  const css = styles.map((node) => node.children.join('')).join('');
-  assert.match(css, /\.qa-strip\[data-variant="sidebar"\] \.qa-pop\{[^}]*left:0;right:auto/,
-    'the sidebar popover must anchor left:0;right:auto or it overflows the screen');
-});
-
-// A fixed 440px card overshoots the strip that hosts it: the overshoot gets
-// clipped by the sidebar's overflow (Run button lost) or slides under the
-// sidebar panel (header title cut). Constraining width to the strip's own box
-// keeps the card inside the slot's allocated space in every window size.
-await test('the popover never exceeds the strip that anchors it', async () => {
-  const styles = findAll(header, (node) => node.type === 'style');
-  const css = styles.map((node) => node.children.join('')).join('');
-  assert.match(css, /\.qa-pop\{[^}]*width:min\(440px,100%\)/,
-    'the popover width must be min(440px,100%) so it stays inside the strip box');
+await test('the card uses a fixed, interactive overlay instead of strip-relative positioning', async () => {
+  const css = findAll(header, (node) => node.type === 'style').map((n) => n.children.join('')).join('');
+  assert.match(css, /\.qa-pop\{position:fixed;[^}]*pointer-events:auto/);
+  assert.match(css, /width:min\(440px,calc\(100vw - 16px\)\)/);
+  assert.ok(!css.includes('.qa-strip[data-variant="sidebar"] .qa-pop'));
 });
 
 // A narrowed footer squeezes the action button; without nowrap the label wraps
@@ -445,22 +436,22 @@ await test('clicking a button starts the run and opens its popover', async () =>
   assert.deepEqual(JSON.parse(posts[0].body), { buttonId: 'clean', sessionId: 'ses-1', params: {} });
 
   header = renderSlot('conversation.session.header.actions');
-  const popover = findAll(header, (node) => node.props && node.props.className === 'qa-pop');
+  const popover = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-pop');
   assert.equal(popover.length, 1, 'popover did not open');
 
   // The popover mounts its poll on this render; one more pass picks up the text.
   await flush();
   header = renderSlot('conversation.session.header.actions');
-  const pre = findAll(header, (node) => node.props && node.props.className === 'qa-out');
+  const pre = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-out');
   assert.equal(pre.length, 1);
   assert.ok(textOf(pre[0]).includes('dist removed'), `output missing: ${JSON.stringify(textOf(pre[0]))}`);
-  assert.ok(buttonByText(header, 'Run again'), 'rerun control missing');
+  assert.ok(buttonByText(renderSlot('shell.overlay'), 'Run again'), 'rerun control missing');
 });
 
 await test('the popover carries the command and an expand control', async () => {
-  const command = findAll(header, (node) => node.props && node.props.className === 'qa-cmd');
+  const command = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-cmd');
   assert.ok(textOf(command[0]).includes('rm -rf dist'));
-  const expand = buttonByText(header, '⤢');
+  const expand = buttonByText(renderSlot('shell.overlay'), '⤢');
   assert.ok(expand, 'expand button missing');
   await expand.props.onClick();
   await flush();
@@ -473,7 +464,7 @@ await test('the popover carries the command and an expand control', async () => 
 
   // Expanding closes the popover behind the mask.
   header = renderSlot('conversation.session.header.actions');
-  assert.equal(findAll(header, (node) => node.props && node.props.className === 'qa-pop').length, 0);
+  assert.equal(findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-pop').length, 0);
 
   // Escape closes the overlay.
   const escape = docListeners.find((l) => l.type === 'keydown');
@@ -500,7 +491,7 @@ await test('an unbound host translator never leaks raw locale keys', async () =>
     await flush();
 
     header = renderSlot('conversation.session.header.actions');
-    const text = textOf(header);
+    const text = textOf(renderSlot('shell.overlay'));
     assert.ok(text.includes('Run again'), `Run again missing; rendered: ${JSON.stringify(text)}`);
     // Whichever lifecycle this fixture is in, the label must be resolved copy.
     assert.ok(
@@ -538,17 +529,17 @@ await test('a parameterized button runs on click and opens its card', async () =
   assert.deepEqual(body.params, {}, 'no typed values yet, so the host applies the defaults');
 
   header = renderSlot('conversation.session.header.actions');
-  const popover = findAll(header, (node) => node.props && node.props.className === 'qa-pop');
+  const popover = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-pop');
   assert.equal(popover.length, 1, 'popover did not open for the parameterized button');
-  const inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  const inputs = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-params-input');
   assert.equal(inputs.length, 2, 'both parameters must render an input');
-  const labels = findAll(header, (node) => node.props && node.props.className === 'qa-params-label');
+  const labels = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-params-label');
   assert.equal(labels[0].props['data-required'], 'true', 'name is required');
 });
 
 await test('a declared default shows as a grey placeholder, not a filled value', async () => {
   header = renderSlot('conversation.session.header.actions');
-  const inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  const inputs = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-params-input');
   const dirInput = inputs[1];
   // `dir` declares default '/tmp': it must read as a hint, so the box stays
   // empty (placeholder) and typing is distinguishable from the suggestion.
@@ -559,7 +550,7 @@ await test('a declared default shows as a grey placeholder, not a filled value',
 
 await test('a chip click reuses values typed in the card', async () => {
   header = renderSlot('conversation.session.header.actions');
-  let inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  let inputs = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-params-input');
   inputs[0].props.onChange({ target: { value: 'Ada' } });
   header = renderSlot('conversation.session.header.actions');
 
@@ -580,20 +571,20 @@ await test('a chip click reuses values typed in the card', async () => {
 
   // Reopening the card shows the remembered value.
   header = renderSlot('conversation.session.header.actions');
-  inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  inputs = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-params-input');
   assert.equal(inputs[0].props.value, 'Ada', 'the card did not restore the typed value');
   void greetButton;
 });
 
 await test('filling parameters and running posts them', async () => {
   header = renderSlot('conversation.session.header.actions');
-  const inputs = findAll(header, (node) => node.props && node.props.className === 'qa-params-input');
+  const inputs = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-params-input');
   assert.equal(inputs.length, 2, 'params inputs missing');
   inputs[0].props.onChange({ target: { value: 'Ada' } });
   inputs[1].props.onChange({ target: { value: '/opt' } });
   header = renderSlot('conversation.session.header.actions');
 
-  const runBtn = buttonByText(header, 'Run');
+  const runBtn = buttonByText(renderSlot('shell.overlay'), 'Run');
   assert.ok(runBtn, 'run button missing');
   const postsBefore = fetchCalls.filter((c) => c.method === 'POST' && c.url.includes('/quick-actions/run')).length;
   await runBtn.props.onClick();
@@ -777,7 +768,7 @@ await test('a failed start surfaces its reason inside the popover', async () => 
   runPostStatus = 200;
 
   header = renderSlot('conversation.session.header.actions');
-  const pre = findAll(header, (node) => node.props && node.props.className === 'qa-out');
+  const pre = findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-out');
   assert.ok(textOf(pre[0]).includes('Could not start'), `reason missing: ${JSON.stringify(textOf(pre[0]))}`);
   assert.ok(textOf(pre[0]).includes('Shell executor unavailable'), 'the mapped reason is missing');
 });
@@ -810,12 +801,12 @@ await test('the sidebar strip follows the session on screen', async () => {
 
 await test('Escape also dismisses an open popover', async () => {
   header = renderSlot('conversation.session.header.actions');
-  assert.equal(findAll(header, (node) => node.props && node.props.className === 'qa-pop').length, 1);
+  assert.equal(findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-pop').length, 1);
 
   const escape = docListeners.find((l) => l.type === 'keydown');
   escape.fn({ key: 'Escape' });
   header = renderSlot('conversation.session.header.actions');
-  assert.equal(findAll(header, (node) => node.props && node.props.className === 'qa-pop').length, 0);
+  assert.equal(findAll(renderSlot('shell.overlay'), (node) => node.props && node.props.className === 'qa-pop').length, 0);
 });
 
 // The restricted client context only exposes ctx.interval to a fiber that
@@ -947,6 +938,9 @@ await test('the header drops global buttons that the sidebar already shows', asy
 // receipt; without that receipt the dot would stay green forever after every
 // run, and the receipt must only clear the button it belongs to.
 await test('reading a finished result clears the green dot', async () => {
+  // Earlier compact-rail coverage opened the full output modal. Close it before
+  // opening a small card; the overlay intentionally renders only one at a time.
+  docListeners.find((l) => l.type === 'keydown').fn({ key: 'Escape' });
   runGetResponse = { ok: true, run: completedRun };
   const hole = 'conversation.session.header.actions';
   const dots = (root) => findAll(root, (n) => n.props && n.props.className === 'qa-dot');
@@ -960,8 +954,10 @@ await test('reading a finished result clears the green dot', async () => {
   assert.ok(chev, 'no popover toggle rendered');
   chev.props.onClick();                 // open the popover on the completed button
   await flush();
+  renderSlot('shell.overlay');
   tree = renderSlot(hole);              // popover mounts, its poll lands completed
   await flush();
+  renderSlot('shell.overlay');
   tree = renderSlot(hole);              // markRead runs inside the popover effect
   tree = renderSlot(hole);              // next pass renders the cleared dot
   assert.ok(!dots(tree).some((n) => n.props['data-state'] === 'completed'),
@@ -974,13 +970,42 @@ await test('reading a finished result clears the green dot', async () => {
 // the opening strip's variant: the header popover left open above must not pop
 // a card in the sidebar, which shows a different scope set and may not even
 // display that button.
-await test('an open popover stays in the strip that opened it', async () => {
+await test('an open popover renders once in the overlay, never in either clipped strip', async () => {
   const headerNow = renderSlot('conversation.session.header.actions');
-  assert.ok(findAll(headerNow, (n) => n.props && n.props.className === 'qa-pop').length > 0,
-    'the popover must render in the strip that opened it');
+  assert.equal(findAll(headerNow, (n) => n.props && n.props.className === 'qa-pop').length, 0);
+  const cards = findAll(renderSlot('shell.overlay'), (n) => n.props && n.props.className === 'qa-pop');
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].props['data-variant'], 'header');
   const sidebar = renderSlot('sidebar.footer.action');
   assert.equal(findAll(sidebar, (n) => n.props && n.props.className === 'qa-pop').length, 0,
     'the sidebar must not pop a card for a button it does not show');
+});
+
+await test('overlay positioning clamps narrow windows and flips near the bottom', () => {
+  // Exercise the pure geometry function, not a mock layout engine.
+  const geometry = source.slice(source.indexOf('  function popoverPosition('), source.indexOf('  function Popover('));
+  const place = new Function(`${geometry}; return popoverPosition;`)();
+  const headerRect = { left: 100, right: 600, top: 40, bottom: 66 };
+  assert.deepEqual(place(headerRect, 'header', 1000, 700), { left: 160, top: 72, maxHeight: 620 });
+  const narrow = place({ left: 2, right: 80, top: 20, bottom: 46 }, 'header', 320, 600);
+  assert.equal(narrow.left, 8);
+  assert.equal(narrow.top, 52);
+  const footerRect = { left: 16, right: 200, top: 650, bottom: 676 };
+  assert.deepEqual(place(footerRect, 'sidebar', 1000, 700), { left: 16, bottom: 56, maxHeight: 636 });
+  assert.equal(place(footerRect, 'header', 1000, 700).bottom, 56);
+  assert.equal(place({ ...headerRect, left: 990, right: 1100 }, 'sidebar', 1000, 700).left, 552);
+});
+
+await test('clicking inside the detached card keeps it open; outside closes it', () => {
+  const card = findAll(renderSlot('shell.overlay'), (n) => n.props && n.props.className === 'qa-pop')[0];
+  const inside = {};
+  card.props.ref.current = { contains: (target) => target === inside };
+  const listener = docListeners.find((l) => l.type === 'mousedown');
+  assert.ok(listener);
+  listener.fn({ target: inside });
+  assert.equal(findAll(renderSlot('shell.overlay'), (n) => n.props && n.props.className === 'qa-pop').length, 1);
+  listener.fn({ target: {} });
+  assert.equal(findAll(renderSlot('shell.overlay'), (n) => n.props && n.props.className === 'qa-pop').length, 0);
 });
 
 // A newly created session briefly renders its header slot without a sessionId,
@@ -998,26 +1023,26 @@ await test('a card opened in one session does not follow into a new one', async 
   await chevron.props.onClick();
   await flush();
   view = renderSlot(slot);
-  if (findAll(view, (n) => n.props && n.props.className === 'qa-pop').length === 0) {
+  if (findAll(renderSlot('shell.overlay'), (n) => n.props && n.props.className === 'qa-pop').length === 0) {
     // The first click closed a card left open by an earlier test; open one.
     chevron = findAll(view, (n) => n.props && n.props.className === 'qa-chev')[0];
     await chevron.props.onClick();
     await flush();
     view = renderSlot(slot);
   }
-  assert.ok(findAll(view, (n) => n.props && n.props.className === 'qa-pop').length > 0,
+  assert.ok(findAll(renderSlot('shell.overlay'), (n) => n.props && n.props.className === 'qa-pop').length > 0,
     'the card should be open in ses-1');
 
   // 2. The same strip now renders a brand-new session.
   slotProps[slot] = { sessionId: 'ses-brand-new' };
   view = renderSlot(slot);
-  assert.equal(findAll(view, (n) => n.props && n.props.className === 'qa-pop').length, 0,
+  assert.equal(findAll(renderSlot('shell.overlay'), (n) => n.props && n.props.className === 'qa-pop').length, 0,
     'the card from ses-1 must not follow into the new session');
 
   // 3. A frame where the new session id is not ready yet must not show it either.
   slotProps[slot] = {};
   view = renderSlot(slot);
-  assert.equal(findAll(view, (n) => n.props && n.props.className === 'qa-pop').length, 0,
+  assert.equal(findAll(renderSlot('shell.overlay'), (n) => n.props && n.props.className === 'qa-pop').length, 0,
     'no card may render while the slot has no session id');
 
   // 4. Switching sessions must never start a run by itself.

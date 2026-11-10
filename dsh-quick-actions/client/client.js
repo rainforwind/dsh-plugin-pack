@@ -4,8 +4,8 @@
 // .actions`, session-scoped props) and the sidebar footer (`sidebar.footer
 // .action`, resolves the session on screen itself). Both end with a "+" that
 // opens the definition panel rendered through `shell.overlay`. Output is shown
-// in a popover anchored to the strip, expandable to a modal in the same
-// overlay slot.
+// in a fixed popover in shell.overlay, anchored to the strip's viewport rect
+// (never inside its clipped ancestors), expandable to a modal in the same slot.
 //
 // The client never computes scope: it sends only the session it renders for,
 // and the host answers with the visible buttons, each carrying its instance
@@ -654,8 +654,10 @@ window.__ModuleLoader__.load({ id: 'dsh-quick-actions', factory: (require) => {
 .qa-add{min-width:24px;height:26px;padding:0 4px;border-radius:6px;border:1px dashed var(--dsw-alias-border-l3);background:transparent;color:var(--dsw-alias-label-secondary);font-size:14px;cursor:pointer;line-height:1;font-family:inherit}
 .qa-add:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
 .qa-empty{font-size:11px;color:var(--dsw-alias-label-tertiary);padding:0 4px}
-.qa-pop{position:absolute;top:calc(100% + 6px);right:0;z-index:60;width:min(440px,100%);max-width:78vw;background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,.32);display:flex;flex-direction:column;overflow:hidden;text-align:left}
-.qa-strip[data-variant="sidebar"] .qa-pop{top:auto;bottom:calc(100% + 6px);left:0;right:auto}
+.qa-pop{position:fixed;z-index:60;pointer-events:auto;box-sizing:border-box;width:min(440px,calc(100vw - 16px));max-height:calc(100vh - 16px);background:var(--dsw-alias-bg-layer-2);border:1px solid var(--dsw-alias-border-l2);border-radius:10px;box-shadow:0 10px 34px rgba(0,0,0,.32);display:flex;flex-direction:column;overflow:hidden;text-align:left;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.qa-pop .qa-out{min-height:0;flex:1 1 auto}
+.qa-pop .qa-params{overflow:auto;min-height:0}
+.qa-pop-head,.qa-pop-foot{flex:none}
 /* The footer slot container is a full-width flex row, but this strip as a flex
    item sizes to its content — so the popover card was only as wide as the chip
    row and the head's floor pushed the close button past the edge. Grow the
@@ -752,8 +754,60 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       text || marker ? marker + text : t('run.empty'));
   }
 
+  // Only our own strip elements are measured. Cards live in shell.overlay,
+  // outside the header's clipped/faded action row and sidebar scroll containers.
+  const popoverAnchors = new Map();
+  const anchorKey = (skey, variant) => `${variant}:${skey}`;
+
+  function popoverPosition(rect, variant, width, height) {
+    const margin = 8;
+    const cardWidth = Math.max(0, Math.min(440, width - margin * 2));
+    const left = Math.max(margin, Math.min(
+      variant === 'sidebar' ? rect.left : rect.right - cardWidth,
+      width - cardWidth - margin
+    ));
+    const below = Math.max(0, height - rect.bottom - 6 - margin);
+    const above = Math.max(0, rect.top - 6 - margin);
+    const upwards = variant === 'sidebar' ? above >= below : below < Math.min(280, above);
+    return {
+      left,
+      ...(upwards ? { bottom: Math.max(margin, height - rect.top + 6) }
+        : { top: Math.max(margin, rect.bottom + 6) }),
+      maxHeight: Math.max(0, upwards ? above : below),
+    };
+  }
+
   function Popover({ sessionId, skey, buttonId, variant, t }) {
     useStore();
+    const cardRef = React.useRef(null);
+    const getPosition = () => {
+      const anchor = popoverAnchors.get(anchorKey(skey, variant));
+      if (!anchor || !anchor.getBoundingClientRect) return { top: 8, left: 8 };
+      return popoverPosition(anchor.getBoundingClientRect(), variant, window.innerWidth, window.innerHeight);
+    };
+    const [position, setPosition] = React.useState(getPosition);
+    React.useEffect(() => {
+      const update = () => {
+        const anchor = popoverAnchors.get(anchorKey(skey, variant));
+        if (anchor && anchor.isConnected === false) {
+          store.popover = null;
+          notify();
+          return;
+        }
+        setPosition(getPosition());
+      };
+      update();
+      window.addEventListener('resize', update);
+      document.addEventListener('scroll', update, true);
+      const anchor = popoverAnchors.get(anchorKey(skey, variant));
+      const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(update) : null;
+      if (observer && anchor) observer.observe(anchor);
+      return () => {
+        window.removeEventListener('resize', update);
+        document.removeEventListener('scroll', update, true);
+        if (observer) observer.disconnect();
+      };
+    }, [skey, buttonId, variant]);
     const context = store.contexts.get(skey);
     const button = ((context && context.buttons) || []).find((entry) => entry.id === buttonId);
     const run = store.runs.get(runKey(skey, buttonId)) || null;
@@ -775,16 +829,18 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       markRead(skey, buttonId, run);
     }, [runToken(run), run && run.status]);
 
-    // Clicking outside the strip dismisses the popover.
+    // The card is no longer inside the strip: both are inside-click targets.
     React.useEffect(() => {
       if (typeof document === 'undefined' || !document.addEventListener) return undefined;
       const onDown = (event) => {
-        const strip = event.target && event.target.closest ? event.target.closest('[data-qa-strip]') : null;
-        if (!strip) { store.popover = null; notify(); }
+        const anchor = popoverAnchors.get(anchorKey(skey, variant));
+        const insideCard = cardRef.current && cardRef.current.contains(event.target);
+        const insideAnchor = anchor && anchor.contains(event.target);
+        if (!insideCard && !insideAnchor) { store.popover = null; notify(); }
       };
       document.addEventListener('mousedown', onDown);
       return () => document.removeEventListener('mousedown', onDown);
-    }, []);
+    }, [skey, variant]);
 
     if (!button) return null;
     const running = !!run && run.status === 'running';
@@ -802,7 +858,8 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       });
     };
 
-    return h('div', { className: 'qa-pop', role: 'dialog', 'aria-label': t('pop.toggle') },
+    return h('div', { className: 'qa-pop', ref: cardRef, style: position, 'data-variant': variant, role: 'dialog', 'aria-label': t('pop.toggle') },
+      h('style', null, CSS),
       h('div', { className: 'qa-pop-head' },
         h('span', { className: 'qa-pop-title' }, button.label),
         h('span', { className: 'qa-status' }, statusText(run, t)),
@@ -928,6 +985,19 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     // shrinks to the icon rail, so the strip goes icon-only and routes output
     // to the overlay instead of the (unrenderable) popover.
     const compact = variant === 'sidebar' && wide === false;
+    const stripRef = React.useRef(null);
+    React.useEffect(() => {
+      const key = anchorKey(skey, variant);
+      if (!compact && stripRef.current) popoverAnchors.set(key, stripRef.current);
+      return () => {
+        popoverAnchors.delete(key);
+        const popover = store.popover;
+        if (popover && popover.skey === skey && popover.variant === variant) {
+          store.popover = null;
+          notify();
+        }
+      };
+    }, [skey, variant, compact]);
 
     React.useEffect(() => {
       const existing = store.active.get(skey);
@@ -968,15 +1038,8 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
       : variant === 'header'
         ? allButtons.filter((button) => button.scope !== 'global')
         : allButtons;
-    // The popover renders only in the strip that opened it: header and sidebar
-    // share skeys on the main session, so without the variant check a header
-    // click would pop the sidebar card too (for a button the sidebar does not
-    // even show).
-    const popover = popoverBelongsTo(store.popover, skey) && store.popover.variant === variant
-      ? store.popover
-      : null;
-
-    return h('div', { className: 'qa-strip', 'data-variant': variant, 'data-compact': compact ? 'true' : 'false', 'data-qa-strip': '' },
+    // Only the anchor lives in this clipped slot; output is in shell.overlay.
+    return h('div', { className: 'qa-strip', ref: stripRef, 'data-variant': variant, 'data-compact': compact ? 'true' : 'false', 'data-qa-strip': '' },
       h('style', null, CSS),
       buttons.length === 0
         ? h('span', { className: 'qa-empty' }, context && context.error ? context.error : t('strip.empty'))
@@ -990,13 +1053,6 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
         variant,
         t,
       })),
-      popover && !compact ? h(Popover, {
-        sessionId: popover.sessionId,
-        skey: popover.skey,
-        buttonId: popover.buttonId,
-        variant: popover.variant,
-        t,
-      }) : null,
       h('button', {
         className: 'qa-add',
         title: t('add.title'),
@@ -1564,7 +1620,11 @@ textarea.qa-input{height:76px;padding:6px 8px;font-family:ui-monospace,SFMono-Re
     useStore();
     const t = composeT(tProp);
     const overlay = store.overlay;
-    if (!overlay) return null;
+    if (!overlay) {
+      const popover = store.popover;
+      if (!popover || !popoverBelongsTo(popover, popover.skey)) return null;
+      return h(Popover, { ...popover, key: `${popover.skey}:${popover.variant}:${popover.buttonId}`, t });
+    }
     if (overlay.kind === 'output') {
       return h(OutputModal, {
         skey: overlay.skey,
